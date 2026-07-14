@@ -1,0 +1,66 @@
+name: Build libretro core
+
+on:
+  push:
+    branches: [libretro]
+  pull_request:
+
+jobs:
+  build-windows-core:
+    name: Windows x86_64 core (cross)
+    runs-on: ubuntu-24.04
+    container: ghcr.io/xemu-project/xemu-win64-toolchain-gcc:sha-2881edd
+    steps:
+      - name: Clone tree
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - name: Configure
+        run: |
+          # build.sh exits nonzero after configuring (it targets the
+          # standalone executable); the core is built directly with ninja.
+          ./build.sh -p win64-cross -Dlibretro=true || true
+          test -f build/build.ninja
+      - name: Build core
+        run: ninja -C build xemu_libretro.dll
+      - name: Upload core
+        uses: actions/upload-artifact@v6
+        with:
+          name: xemu_libretro-win64
+          path: build/xemu_libretro.dll
+
+  build-linux-core:
+    name: Linux x86_64 core
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Clone tree
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc g++ meson ninja-build cmake curl \
+            libglib2.0-dev libpixman-1-dev libepoxy-dev libvulkan-dev \
+            libx11-dev libgtk-3-dev libssl-dev libsamplerate0-dev \
+            libpcap-dev libslirp-dev
+          # SDL3 is not packaged on ubuntu-24.04; the tree's cmake
+          # subproject needs the X11 dev stack to build it.
+          sudo apt-get install -y libxext-dev libxrandr-dev libxcursor-dev \
+            libxfixes-dev libxi-dev libxss-dev libwayland-dev \
+            libxkbcommon-dev libdrm-dev libgbm-dev libasound2-dev \
+            libpulse-dev
+      - name: Configure
+        run: |
+          mkdir build-libretro && cd build-libretro
+          ../configure --extra-cflags="-DXBOX=1" --target-list=i386-softmmu \
+            -Dlibretro=true -Db_staticpic=true
+      - name: Build core
+        run: ninja -C build-libretro xemu_libretro.so
+      - name: Upload core
+        uses: actions/upload-artifact@v6
+        with:
+          name: xemu_libretro-linux-x86_64
+          path: build-libretro/xemu_libretro.so

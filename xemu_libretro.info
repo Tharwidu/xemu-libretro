@@ -1,0 +1,45 @@
+# Software Information
+display_name = "Microsoft - Xbox (xemu)"
+authors = "xemu team"
+supported_extensions = "iso|xiso"
+corename = "xemu"
+manufacturer = "Microsoft"
+categories = "Emulator"
+systemname = "Microsoft Xbox"
+systemid = "xbox"
+license = "GPLv2"
+permissions = ""
+display_version = "0.8.x"
+supports_no_game = "false"
+
+# Hardware Information
+database = "Microsoft - Xbox"
+
+# Libretro Features
+savestate = "true"
+savestate_features = "basic"
+cheats = "false"
+input_descriptors = "true"
+memory_descriptors = "false"
+libretro_saves = "false"
+core_options = "true"
+core_options_version = "2.0"
+load_subsystem = "false"
+hw_render = "true"
+needs_fullpath = "true"
+disk_control = "false"
+is_experimental = "true"
+
+# Firmware / system files (system/xemu/)
+firmware_count = 3
+firmware0_desc = "mcpx_1.0.bin (MCPX Boot ROM)"
+firmware0_path = "xemu/mcpx_1.0.bin"
+firmware0_opt = "false"
+firmware1_desc = "Complex_4627v1.03.bin (Xbox flash BIOS)"
+firmware1_path = "xemu/Complex_4627v1.03.bin"
+firmware1_opt = "false"
+firmware2_desc = "xbox_hdd.qcow2 (Xbox HDD image)"
+firmware2_path = "xemu/xbox_hdd.qcow2"
+firmware2_opt = "false"
+
+notes = "(!) System files go in the RetroArch system/xemu/ directory.|A missing xbox_eeprom.bin is generated on first run.|Content must be xiso format; convert other dumps with extract-xiso.|Save states restore full machine state but do not support rewind, run-ahead or netplay."

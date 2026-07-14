@@ -1160,6 +1160,17 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
         }
     }
 
+    /* QEMU cannot re-initialize in-process: its global state (machine,
+     * memory regions, chardevs, RCU threads) has no full teardown path.
+     * Refuse a second load with a clear message instead of crashing. */
+    static bool emu_was_started;
+    if (emu_was_started) {
+        show_user_message("xemu: restart RetroArch to load another game "
+                          "(the emulator cannot re-initialize in-process)");
+        return false;
+    }
+    emu_was_started = true;
+
     /* Validate required files exist (with frontend OSD messages: the log
      * is invisible to most users) */
     {
