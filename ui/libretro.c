@@ -16,6 +16,8 @@
 #include "system/runstate.h"
 #include "system/cpus.h"
 #include "migration/snapshot.h"
+#include "hw/xbox/eeprom_generation.h"
+#include "crypto/init.h"
 #include "ui/console.h"
 #include "hw/xbox/nv2a/nv2a.h"
 
@@ -137,6 +139,12 @@ static volatile bool snapshot_done = false;
 static volatile bool snapshot_result = false;
 static QemuSemaphore snapshot_done_sem;       /* signal RA thread */
 static bool snapshot_sem_initialized = false;
+static char snapshot_name[32] = "libretro_save";
+
+/* Pause watchdog: monotonic time of the last retro_run call. The emulator
+ * otherwise free-runs in real time while the frontend menu is open. */
+static volatile int64_t last_retro_run_us;
+static bool watchdog_paused;
 
 /* ========================================================================= */
 /* Core option values                                                        */
@@ -659,14 +667,32 @@ static void get_option_string(const char *key, char *buf, size_t buf_sz)
     }
 }
 
+/* Surface fatal setup problems in the frontend's OSD, not just the log. */
+static void show_user_message(const char *text)
+{
+    LRLOG_ERROR("%s\n", text);
+    if (environ_cb) {
+        struct retro_message msg = { text, 360 }; /* ~6 seconds */
+        environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &msg);
+    }
+}
+
 static void update_variables(void)
 {
     struct retro_variable var;
 
-    get_option_string("xemu_bootrom_path", opt_bootrom_path, sizeof(opt_bootrom_path));
-    get_option_string("xemu_bios_path", opt_bios_path, sizeof(opt_bios_path));
-    get_option_string("xemu_hdd_path", opt_hdd_path, sizeof(opt_hdd_path));
-    get_option_string("xemu_eeprom_path", opt_eeprom_path, sizeof(opt_eeprom_path));
+    /* Optional path overrides. These are plain config variables, not
+     * registered options (frontends have no path-typed option UI), so
+     * probe them once to keep frontends from logging unknown-variable
+     * errors on every option change. */
+    static bool paths_probed;
+    if (!paths_probed) {
+        paths_probed = true;
+        get_option_string("xemu_bootrom_path", opt_bootrom_path, sizeof(opt_bootrom_path));
+        get_option_string("xemu_bios_path", opt_bios_path, sizeof(opt_bios_path));
+        get_option_string("xemu_hdd_path", opt_hdd_path, sizeof(opt_hdd_path));
+        get_option_string("xemu_eeprom_path", opt_eeprom_path, sizeof(opt_eeprom_path));
+    }
 
     var.key = "xemu_memory";
     var.value = NULL;
@@ -863,6 +889,30 @@ static void *emu_thread_func(void *opaque)
         
         main_loop_wait(false);
 
+        /* Pause watchdog: when the frontend stops calling retro_run (menu
+         * open, focus loss with pause_nonactive), stop the VM instead of
+         * letting gameplay continue unattended; resume as soon as calls
+         * return. retro_run's vblank bottom-half wakes this loop, so
+         * resume latency is one frame. */
+        {
+            int64_t last = qatomic_read(&last_retro_run_us);
+            if (last) {
+                int64_t idle_us = g_get_monotonic_time() - last;
+                if (!watchdog_paused && idle_us > 200000 &&
+                    runstate_is_running()) {
+                    vm_stop(RUN_STATE_PAUSED);
+                    watchdog_paused = true;
+                    LRLOG_INFO("[xemu] Frontend idle; pausing VM\n");
+                } else if (watchdog_paused && idle_us < 100000) {
+                    watchdog_paused = false;
+                    if (runstate_check(RUN_STATE_PAUSED)) {
+                        vm_start();
+                    }
+                    LRLOG_INFO("[xemu] Frontend back; resuming VM\n");
+                }
+            }
+        }
+
         /* Check for snapshot requests from RetroArch thread */
         if (snapshot_request != SNAPSHOT_NONE) {
             int req = snapshot_request;
@@ -871,14 +921,14 @@ static void *emu_thread_func(void *opaque)
             Error *snap_err = NULL;
 
             if (req == SNAPSHOT_SAVE) {
-                ok = save_snapshot("libretro_save", true, NULL, false, NULL, &snap_err);
+                ok = save_snapshot(snapshot_name, true, NULL, false, NULL, &snap_err);
                 if (!ok && snap_err) {
                     error_free(snap_err);
                 }
             } else if (req == SNAPSHOT_LOAD) {
                 bool was_running = runstate_is_running();
                 vm_stop(RUN_STATE_RESTORE_VM);
-                ok = load_snapshot("libretro_save", NULL, false, NULL, &snap_err);
+                ok = load_snapshot(snapshot_name, NULL, false, NULL, &snap_err);
                 if (ok && was_running) {
                     vm_start();
                 } else if (!ok) {
@@ -1110,13 +1160,17 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
         }
     }
 
-    /* Validate required files exist */
+    /* Validate required files exist (with frontend OSD messages: the log
+     * is invisible to most users) */
     {
+        char msg[512];
         FILE *f;
         f = fopen(opt_bootrom_path, "rb");
         if (!f) {
-            LRLOG_ERROR("[xemu] MCPX Boot ROM not found: %s\n", opt_bootrom_path);
-            LRLOG_ERROR("[xemu] Place mcpx_1.0.bin in RetroArch system/xemu/ directory\n");
+            snprintf(msg, sizeof(msg),
+                     "xemu: MCPX boot ROM missing - expected %s",
+                     opt_bootrom_path);
+            show_user_message(msg);
             return false;
         }
         fclose(f);
@@ -1124,8 +1178,9 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
 
         f = fopen(opt_bios_path, "rb");
         if (!f) {
-            LRLOG_ERROR("[xemu] Xbox BIOS not found: %s\n", opt_bios_path);
-            LRLOG_ERROR("[xemu] Place Complex_4627v1.03.bin in RetroArch system/xemu/ directory\n");
+            snprintf(msg, sizeof(msg),
+                     "xemu: Xbox BIOS missing - expected %s", opt_bios_path);
+            show_user_message(msg);
             return false;
         }
         fclose(f);
@@ -1133,12 +1188,81 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
 
         f = fopen(opt_hdd_path, "rb");
         if (!f) {
-            LRLOG_ERROR("[xemu] Xbox HDD image not found: %s\n", opt_hdd_path);
-            LRLOG_ERROR("[xemu] Place xbox_hdd.qcow2 in RetroArch system/xemu/ directory\n");
+            snprintf(msg, sizeof(msg),
+                     "xemu: Xbox HDD image missing - expected %s",
+                     opt_hdd_path);
+            show_user_message(msg);
             return false;
         }
         fclose(f);
         LRLOG_INFO("[xemu] Found hdd: %s\n", opt_hdd_path);
+
+        /* EEPROM: generate a fresh one if absent (same as standalone xemu
+         * first-run behavior) rather than failing later. */
+        f = fopen(opt_eeprom_path, "rb");
+        if (f) {
+            fclose(f);
+        } else if (qcrypto_init(NULL) == 0 &&
+                   xbox_eeprom_generate(opt_eeprom_path, XBOX_EEPROM_VERSION_R1)) {
+            /* qcrypto_init: eeprom generation draws from the crypto RNG and
+             * we run before qemu_init (gnutls/gcrypt inits are refcounted,
+             * so the later init call is unaffected). */
+            snprintf(msg, sizeof(msg), "xemu: generated new EEPROM at %s",
+                     opt_eeprom_path);
+            show_user_message(msg);
+        }
+
+        /* Warn early about content that is not an xiso image (redump-style
+         * dumps need conversion, e.g. with extract-xiso): the console
+         * otherwise silently boots to the dashboard. */
+        f = fopen(game->path, "rb");
+        if (f) {
+            static const char xiso_magic[] = "MICROSOFT*XBOX*MEDIA";
+            static const int64_t offsets[] = { 0x10000, 0x18310000 };
+            char probe[20];
+            bool looks_xiso = false;
+            for (size_t i = 0; i < ARRAY_SIZE(offsets); i++) {
+                if (fseek(f, offsets[i], SEEK_SET) == 0 &&
+                    fread(probe, 1, sizeof(probe), f) == sizeof(probe) &&
+                    memcmp(probe, xiso_magic, sizeof(probe)) == 0) {
+                    looks_xiso = true;
+                    break;
+                }
+            }
+            fclose(f);
+            if (!looks_xiso) {
+                show_user_message("xemu: content is not an xiso disc image; "
+                                  "convert it (e.g. extract-xiso) if the "
+                                  "console boots to the dashboard");
+            }
+        }
+    }
+
+    /* Per-content snapshot name: save states live as snapshots inside the
+     * shared HDD image, so they must not collide across games. */
+    {
+        const char *base = strrchr(game->path, '/');
+#ifdef _WIN32
+        const char *bs = strrchr(game->path, '\\');
+        if (bs && (!base || bs > base)) {
+            base = bs;
+        }
+#endif
+        base = base ? base + 1 : game->path;
+        uint32_t hash = 2166136261u;
+        for (const char *c = base; *c; c++) {
+            hash = (hash ^ (uint8_t)*c) * 16777619u;
+        }
+        snprintf(snapshot_name, sizeof(snapshot_name), "lr-%08x", hash);
+        LRLOG_INFO("[xemu] Save-state snapshot name: %s\n", snapshot_name);
+    }
+
+    /* States restore full machine state but are not deterministic
+     * frame-serializations: tell the frontend not to offer rewind,
+     * runahead or netplay based on them. */
+    {
+        uint64_t quirks = RETRO_SERIALIZATION_QUIRK_INCOMPLETE;
+        environ_cb(RETRO_ENVIRONMENT_SET_SERIALIZATION_QUIRKS, &quirks);
     }
 
     /* Query the frontend's preferred HW render context */
@@ -1260,6 +1384,7 @@ RETRO_API void retro_run(void)
 {
     static int run_count = 0;
     run_count++;
+    qatomic_set(&last_retro_run_us, g_get_monotonic_time());
     if (run_count <= 5 || (run_count % 300) == 0) {
         LRLOG_INFO("[xemu] retro_run #%d (emu_init=%d ctx_ready=%d game=%d)\n",
                    run_count, emu_initialized, context_ready, game_loaded);
@@ -1488,6 +1613,9 @@ static bool snapshot_dispatch(int request_type, int timeout_ms)
     snapshot_done = false;
     snapshot_result = false;
     snapshot_request = request_type;
+    /* The emulator loop may be idle (VM paused by the watchdog while the
+     * frontend menu is open — the usual moment for save states). */
+    qemu_notify_event();
 
     /* Wait for the emu thread to process it */
     if (qemu_sem_timedwait(&snapshot_done_sem, timeout_ms) < 0) {
