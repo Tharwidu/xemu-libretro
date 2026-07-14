@@ -814,6 +814,12 @@ static void populate_config(const char *dvd_path)
     /* Set memory (mem_limit is an int: 0=64MB, 1=128MB) */
     g_config.sys.mem_limit = (opt_memory_mb == 128) ? 1 : 0;
 
+    /* Upstream defaults that the settings stub does not apply (g_config
+     * is zero-initialized here; keep in sync with config_spec.yml).
+     * Fields covered by core options are set below instead. */
+    g_config.audio.use_dsp_jit = true;
+    g_config.audio.hrtf = true;
+
     /* Critical defaults for libretro mode */
     g_config.general.show_welcome = false;
     g_config.audio.volume_limit = opt_audio_volume / 100.0f;
