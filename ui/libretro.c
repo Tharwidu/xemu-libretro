@@ -1265,6 +1265,30 @@ RETRO_API void retro_run(void)
                    run_count, emu_initialized, context_ready, game_loaded);
     }
 
+    /* Pace retro_run to the emulated display rate when the frontend does
+     * not throttle us (vsync unavailable or disabled, audio sync starved
+     * because the APU produces audio in real time, occluded windows on
+     * some Wayland compositors). Overspeeding is actively harmful here:
+     * every retro_run performs a blocking display sync against the
+     * PFIFO thread, so excess calls starve the emulation threads —
+     * seen as stutter in heavier titles. When the frontend already
+     * throttles at or below content rate the deadline is always in the
+     * past and this block is a no-op. */
+    {
+        static int64_t next_frame_us;
+        const int64_t frame_us = 16683; /* 1 / 59.94 Hz */
+        int64_t now_us = g_get_monotonic_time();
+        if (next_frame_us == 0 || now_us > next_frame_us + 2 * frame_us) {
+            next_frame_us = now_us; /* first frame, or resync after a stall */
+        }
+        while (now_us < next_frame_us) {
+            int64_t remain_us = next_frame_us - now_us;
+            g_usleep(remain_us > 2000 ? remain_us - 1000 : remain_us);
+            now_us = g_get_monotonic_time();
+        }
+        next_frame_us += frame_us;
+    }
+
     /* Schedule vblank (graphic_hw_update) on emu thread */
     {
         QemuConsole *con = nv2a_get_vga_console();
