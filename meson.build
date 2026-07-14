@@ -2407,18 +2407,27 @@ endif
 
 if vulkan.found()
   if get_option('libretro')
-    # For libretro: use static glslang + SPIRV-Tools libraries to avoid shared DLL deps
-    libglslang = declare_dependency(
-      dependencies: [
-        cc.find_library('glslang', static: true),
-        cc.find_library('MachineIndependent', static: true),
-        cc.find_library('GenericCodeGen', static: true),
-        cc.find_library('SPIRV', static: true),
-        cc.find_library('glslang-default-resource-limits', static: true),
-        cc.find_library('SPIRV-Tools', static: true),
-        cc.find_library('SPIRV-Tools-opt', static: true),
-      ]
-    )
+    # For libretro: prefer static glslang + SPIRV-Tools libraries to avoid
+    # shared library deps in the core. Fall back to the system dependency /
+    # cmake subproject below when the toolchain does not ship them (e.g. the
+    # xemu win64 cross containers and typical Linux distros).
+    glslang_static_libs = []
+    glslang_static_ok = true
+    foreach name : ['glslang', 'MachineIndependent', 'GenericCodeGen',
+                    'SPIRV', 'glslang-default-resource-limits',
+                    'SPIRV-Tools', 'SPIRV-Tools-opt']
+      lib = cc.find_library(name, static: true, required: false)
+      if lib.found()
+        glslang_static_libs += lib
+      else
+        glslang_static_ok = false
+      endif
+    endforeach
+    if glslang_static_ok
+      libglslang = declare_dependency(dependencies: glslang_static_libs)
+    else
+      libglslang = dependency('glslang', version: '>=15.0.0', required: false)
+    endif
   else
     libglslang = dependency('glslang', version: '>=15.0.0', required: false)
   endif
