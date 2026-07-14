@@ -2434,6 +2434,7 @@ if vulkan.found()
   if not libglslang.found()
     # FIXME: Get spirv-tools to enable opt.
     glslang_opts = cmake.subproject_options()
+    glslang_opts.add_cmake_defines({'CMAKE_POSITION_INDEPENDENT_CODE': get_option('libretro')})
     glslang_opts.add_cmake_defines({'ENABLE_OPT': false, 'ENABLE_HLSL': false})
     glslang_subpro = cmake.subproject('glslang', options: glslang_opts)
     libglslang = declare_dependency(link_with: [
@@ -2446,6 +2447,7 @@ if vulkan.found()
   endif
 
   volk_opts = cmake.subproject_options()
+  volk_opts.add_cmake_defines({'CMAKE_POSITION_INDEPENDENT_CODE': get_option('libretro')})
   volk_opts.add_cmake_defines({'VOLK_STATIC_DEFINES': 'VK_NO_PROTOTYPES'})
   if host_os == 'windows'
     volk_opts.append_compile_args('c', '-DVK_USE_PLATFORM_WIN32_KHR=1')
@@ -2457,6 +2459,7 @@ if vulkan.found()
                             dependencies: vulkan)
 
   spirv_reflect_opts = cmake.subproject_options()
+  spirv_reflect_opts.add_cmake_defines({'CMAKE_POSITION_INDEPENDENT_CODE': get_option('libretro')})
   spirv_reflect_opts.add_cmake_defines({'SPIRV_REFLECT_STATIC_LIB': 'ON'})
   spirv_reflect_subproj = cmake.subproject('SPIRV-Reflect', options: spirv_reflect_opts)
   spirv_reflect = declare_dependency(include_directories: spirv_reflect_subproj.include_directories('spirv-reflect-static'),
@@ -4660,6 +4663,10 @@ foreach target : target_dirs
       libretro_link_args = link_args
       if host_os == 'windows'
         libretro_link_args += ['-liphlpapi', '-static', '-static-libgcc', '-static-libstdc++']
+      elif not get_option('b_staticpic')
+        error('The libretro core is a shared library; configure with ' +
+              '-Db_staticpic=true so the static helper libraries are ' +
+              'built as position-independent code')
       endif
       xemu_libretro = shared_library('xemu_libretro',
         files('system/main.c'),
@@ -4669,8 +4676,9 @@ foreach target : target_dirs
         objects: lib.extract_all_objects(recursive: true),
         link_depends: [block_syms, qemu_syms],
         link_args: libretro_link_args,
+        # default name_suffix gives the conventional core extension per
+        # platform: .dll (Windows), .so (Linux), .dylib (macOS)
         name_prefix: '',
-        name_suffix: 'dll',
       )
       emulators += {'xemu_libretro': xemu_libretro}
     else
