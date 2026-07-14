@@ -22,7 +22,7 @@
 #include <epoxy/gl.h>
 
 #include "libretro.h"
-#ifndef VK_USE_PLATFORM_WIN32_KHR
+#if defined(_WIN32) && !defined(VK_USE_PLATFORM_WIN32_KHR)
 #define VK_USE_PLATFORM_WIN32_KHR
 #endif
 #include "libretro_vulkan.h"
@@ -135,8 +135,8 @@ enum {
 static volatile int snapshot_request = SNAPSHOT_NONE;
 static volatile bool snapshot_done = false;
 static volatile bool snapshot_result = false;
-static HANDLE snapshot_request_event = NULL;  /* signal emu thread */
-static HANDLE snapshot_done_event = NULL;     /* signal RA thread */
+static QemuSemaphore snapshot_done_sem;       /* signal RA thread */
+static bool snapshot_sem_initialized = false;
 
 /* ========================================================================= */
 /* Core option values                                                        */
@@ -465,6 +465,14 @@ static void ra_vk_cleanup_display(void)
 
 static bool ra_vk_import_display(void *ext_handle, int width, int height)
 {
+#ifndef _WIN32
+    /* Import uses Win32 external-memory handles; on other platforms the
+     * Vulkan context is never negotiated (see retro_load_game). */
+    (void)ext_handle;
+    (void)width;
+    (void)height;
+    return false;
+#else
     if (!vulkan_if || !ra_vk_funcs_resolved || !ext_handle || !width || !height)
         return false;
 
@@ -566,6 +574,7 @@ static bool ra_vk_import_display(void *ext_handle, int width, int height)
     ra_last_handle = ext_handle;
 
     return true;
+#endif /* _WIN32 */
 }
 
 /* ========================================================================= */
@@ -882,7 +891,9 @@ static void *emu_thread_func(void *opaque)
 
             snapshot_result = ok;
             snapshot_done = true;
-            if (snapshot_done_event) SetEvent(snapshot_done_event);
+            if (snapshot_sem_initialized) {
+                qemu_sem_post(&snapshot_done_sem);
+            }
         }
     }
 
@@ -1138,6 +1149,17 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
     LRLOG_INFO("[xemu] Frontend preferred HW render: %u\n", preferred_hw);
 
     bool want_vulkan = (preferred_hw == RETRO_HW_CONTEXT_VULKAN);
+#ifndef _WIN32
+    /* Vulkan display sharing (external memory import into the frontend's
+     * VkDevice) is only implemented with Win32 handles so far; request
+     * OpenGL instead of negotiating a Vulkan context we cannot feed. */
+    if (want_vulkan) {
+        LRLOG_INFO("[xemu] Frontend prefers Vulkan, but Vulkan display "
+                   "sharing is not yet supported on this platform; "
+                   "requesting OpenGL\n");
+        want_vulkan = false;
+    }
+#endif
 
     /* Setup hardware rendering based on frontend preference */
     memset(&hw_render, 0, sizeof(hw_render));
@@ -1434,11 +1456,9 @@ struct libretro_savestate_header {
 
 static bool snapshot_dispatch(int request_type, int timeout_ms)
 {
-    if (!snapshot_request_event) {
-        snapshot_request_event = CreateEvent(NULL, FALSE, FALSE, NULL);
-    }
-    if (!snapshot_done_event) {
-        snapshot_done_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+    if (!snapshot_sem_initialized) {
+        qemu_sem_init(&snapshot_done_sem, 0);
+        snapshot_sem_initialized = true;
     }
 
     snapshot_done = false;
@@ -1446,8 +1466,7 @@ static bool snapshot_dispatch(int request_type, int timeout_ms)
     snapshot_request = request_type;
 
     /* Wait for the emu thread to process it */
-    DWORD result = WaitForSingleObject(snapshot_done_event, timeout_ms);
-    if (result == WAIT_TIMEOUT) {
+    if (qemu_sem_timedwait(&snapshot_done_sem, timeout_ms) < 0) {
         LRLOG_INFO("[xemu] snapshot dispatch: timeout after %dms\n", timeout_ms);
         snapshot_request = SNAPSHOT_NONE;
         return false;
