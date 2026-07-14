@@ -295,4 +295,38 @@ int pgraph_gl_get_framebuffer_surface(NV2AState *d);
 void pgraph_gl_determine_gpu_properties(void);
 GPUProperties *pgraph_gl_get_gpu_properties(void);
 
+/* Tolerate-and-report replacement for assert(glGetError() == GL_NO_ERROR).
+ * Some GL stacks (notably wine/Proton WGL) latch benign errors that upstream
+ * treats as invariant violations; aborting the whole frontend over them is
+ * worse than reporting them. Drains the error flag so later checks aren't
+ * misattributed. */
+static inline void pgraph_gl_check_error(const char *where)
+{
+    static int reports;
+    GLenum err;
+    while ((err = glGetError()) != GL_NO_ERROR) {
+        if (reports < 32) {
+            fprintf(stderr, "[nv2a] tolerated GL error 0x%04x at %s\n",
+                    err, where);
+            reports++;
+        }
+    }
+}
+
+/* Same policy for FBO completeness: transiently-incomplete framebuffers
+ * (e.g. between color/zeta attachment rebinds) drop draws for a moment but
+ * recover; report instead of aborting. */
+static inline void pgraph_gl_check_fbo(const char *where)
+{
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        static int reports;
+        if (reports < 16) {
+            fprintf(stderr, "[nv2a] tolerated incomplete FBO (0x%04x) at %s\n",
+                    status, where);
+            reports++;
+        }
+    }
+}
+
 #endif

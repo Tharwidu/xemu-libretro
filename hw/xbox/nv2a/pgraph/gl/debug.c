@@ -65,7 +65,7 @@ void gl_debug_initialize(void)
          */
 #else
        glEnable(GL_DEBUG_OUTPUT);
-       assert(glGetError() == GL_NO_ERROR);
+       pgraph_gl_check_error(__func__);
 #endif
     }
 
@@ -112,13 +112,13 @@ void gl_debug_group_begin(const char *fmt, ...)
     }
 
     /* Check for errors before starting real commands in group */
-    assert(glGetError() == GL_NO_ERROR);
+    pgraph_gl_check_error(__func__);
 }
 
 void gl_debug_group_end(void)
 {
     /* Check for errors when leaving group */
-    assert(glGetError() == GL_NO_ERROR);
+    pgraph_gl_check_error(__func__);
 
     /* Debug group end */
     if (has_GL_KHR_debug) {

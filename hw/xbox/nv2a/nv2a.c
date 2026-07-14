@@ -210,6 +210,28 @@ static void nv2a_vga_gfx_update(void *opaque)
     d->pcrtc.pending_interrupts |= NV_PCRTC_INTR_0_VBLANK;
     d->pcrtc.raster = 0;
 
+#ifdef LIBRETRO
+    /* XEMU_DEBUG: report the actual vblank rate — games paced by vblank
+     * interrupts run fast if something double-drives this. */
+    {
+        static int dbg = -1;
+        static int64_t last_ns;
+        static int count;
+        if (dbg < 0) {
+            const char *v = getenv("XEMU_DEBUG");
+            dbg = (v && v[0] && v[0] != '0') ? 1 : 0;
+        }
+        if (dbg && (++count % 300) == 0) {
+            int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+            if (last_ns) {
+                fprintf(stderr, "[nv2a] vblank rate: %.1f Hz\n",
+                        300e9 / (double)(now - last_ns));
+            }
+            last_ns = now;
+        }
+    }
+#endif
+
     nv2a_update_irq(d);
 }
 

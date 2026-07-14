@@ -233,8 +233,8 @@ static void render_surface_to(NV2AState *d, SurfaceBinding *surface,
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, gl_target,
                            gl_texture, 0);
     glDrawBuffers(1, draw_buffers);
-    assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
-    assert(glGetError() == GL_NO_ERROR);
+    pgraph_gl_check_fbo(__func__);
+    pgraph_gl_check_error(__func__);
 
     float color[] = { 0.0f, 0.0f, 0.0f, 0.0f };
     glBindTexture(GL_TEXTURE_2D, surface->gl_buffer);
@@ -648,8 +648,7 @@ static void bind_current_surface(NV2AState *d)
     }
 
     if (r->color_binding || r->zeta_binding) {
-        assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) ==
-               GL_FRAMEBUFFER_COMPLETE);
+        pgraph_gl_check_fbo(__func__);
     }
 }
 
@@ -708,7 +707,7 @@ static void surface_download_to_buffer(NV2AState *d, SurfaceBinding *surface,
     glFramebufferTexture2D(GL_FRAMEBUFFER, surface->fmt.gl_attachment,
                            GL_TEXTURE_2D, surface->gl_buffer, 0);
 
-    assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+    pgraph_gl_check_fbo(__func__);
 
     /* Read surface into memory */
     uint8_t *gl_read_buf = pixels;
@@ -1268,8 +1267,7 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
 
         glFramebufferTexture2D(GL_FRAMEBUFFER, entry.fmt.gl_attachment,
                                GL_TEXTURE_2D, found->gl_buffer, 0);
-        assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) ==
-               GL_FRAMEBUFFER_COMPLETE);
+        pgraph_gl_check_fbo(__func__);
 
         surface->buffer_dirty = false;
     }

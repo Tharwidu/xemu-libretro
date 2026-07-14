@@ -454,6 +454,74 @@ void glo_set_current(GloContext *context)
     }
 }
 
+typedef struct GloSavedCurrent {
+    GloBackend backend;
+    EGLDisplay egl_display;
+    EGLSurface egl_draw;
+    EGLSurface egl_read;
+    EGLContext egl_context;
+#ifdef GLO_HAVE_GLX
+    Display *glx_display;
+    GLXDrawable glx_draw;
+    GLXDrawable glx_read;
+    GLXContext glx_context;
+#endif
+} GloSavedCurrent;
+
+void *glo_save_current(void)
+{
+    GloSavedCurrent *s = (GloSavedCurrent *)calloc(1, sizeof(*s));
+    if (!s) {
+        return NULL;
+    }
+    EGLContext ectx = eglGetCurrentContext();
+    if (ectx != EGL_NO_CONTEXT) {
+        s->backend = GLO_BACKEND_EGL;
+        s->egl_display = eglGetCurrentDisplay();
+        s->egl_draw = eglGetCurrentSurface(EGL_DRAW);
+        s->egl_read = eglGetCurrentSurface(EGL_READ);
+        s->egl_context = ectx;
+        return s;
+    }
+#ifdef GLO_HAVE_GLX
+    GLXContext gctx = glXGetCurrentContext();
+    if (gctx) {
+        s->backend = GLO_BACKEND_GLX;
+        s->glx_display = glXGetCurrentDisplay();
+        s->glx_draw = glXGetCurrentDrawable();
+        s->glx_read = glXGetCurrentReadDrawable();
+        s->glx_context = gctx;
+    }
+#endif
+    return s;
+}
+
+void glo_restore_current(void *saved)
+{
+    GloSavedCurrent *s = (GloSavedCurrent *)saved;
+    if (!s) {
+        return;
+    }
+    switch (s->backend) {
+    case GLO_BACKEND_EGL:
+        eglBindAPI(EGL_OPENGL_API);
+        eglMakeCurrent(s->egl_display, s->egl_draw, s->egl_read,
+                       s->egl_context);
+        break;
+#ifdef GLO_HAVE_GLX
+    case GLO_BACKEND_GLX:
+        glXMakeContextCurrent(s->glx_display, s->glx_draw, s->glx_read,
+                              s->glx_context);
+        break;
+#endif
+    default:
+        /* Nothing was current; leave the released state from
+         * glo_context_destroy() in place. */
+        break;
+    }
+    free(s);
+}
+
 void glo_context_destroy(GloContext *context)
 {
     if (!context) {

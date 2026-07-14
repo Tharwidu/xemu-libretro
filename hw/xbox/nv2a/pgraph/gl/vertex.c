@@ -280,7 +280,7 @@ void pgraph_gl_init_buffers(NV2AState *d)
     glGenVertexArrays(1, &r->gl_vertex_array);
     glBindVertexArray(r->gl_vertex_array);
 
-    assert(glGetError() == GL_NO_ERROR);
+    pgraph_gl_check_error(__func__);
 }
 
 void pgraph_gl_finalize_buffers(PGRAPHState *pg)

@@ -1746,8 +1746,11 @@ voice_work_dispatch(MCPXAPUState *d,
         // Signal workers and wait for completion
         voice_work_schedule(d);
         qemu_cond_broadcast(&vwd->work_pending);
-        qemu_cond_wait(&vwd->work_finished, &vwd->lock);
-        assert(!vwd->workers_pending);
+        /* Loop the wait: qemu_cond_wait is subject to spurious wakeups, so
+         * re-check the predicate instead of asserting it. */
+        while (vwd->workers_pending) {
+            qemu_cond_wait(&vwd->work_finished, &vwd->lock);
+        }
         vwd->queue_len = 0;
 
         // Add voice contributions
@@ -1786,8 +1789,9 @@ static void voice_work_init(MCPXAPUState *d)
         qemu_thread_create(&vwd->workers[i].thread, "mcpx.voice_worker",
                            voice_worker_thread, d, QEMU_THREAD_JOINABLE);
     }
-    qemu_cond_wait(&vwd->work_finished, &vwd->lock);
-    assert(!vwd->workers_pending);
+    while (vwd->workers_pending) {
+        qemu_cond_wait(&vwd->work_finished, &vwd->lock);
+    }
     qemu_mutex_unlock(&vwd->lock);
 }
 

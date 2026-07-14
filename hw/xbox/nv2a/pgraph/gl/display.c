@@ -27,6 +27,137 @@
 
 #include <math.h>
 
+/*
+ * The display path shares an object space (and, in libretro mode, a screen
+ * DC) with the frontend's GL context. Frontend shader pipelines (e.g. legacy
+ * GLSL presets in RetroArch 1.7.x) can leave GL errors latched where they
+ * become observable here. Those are not display-path invariant violations,
+ * so tolerate and report them instead of aborting the whole frontend.
+ */
+static void display_drain_gl_errors(const char *where)
+{
+    static int reports = 0;
+    GLenum err;
+    while ((err = glGetError()) != GL_NO_ERROR) {
+        if (reports < 16) {
+            fprintf(stderr, "[nv2a] tolerated GL error 0x%04x at %s\n",
+                    err, where);
+            reports++;
+        }
+    }
+}
+
+#ifdef LIBRETRO
+/*
+ * Self-contained display readback: the PFIFO thread copies each rendered
+ * display frame (gl_display_buffer) to CPU memory on xemu's own display
+ * context, so the libretro frontend can consume plain software frames with
+ * no dependency on the frontend's GL context or texture sharing.
+ */
+static struct {
+    bool inited;
+    bool enabled;
+    QemuMutex lock;
+    uint32_t *pixels;   /* rows bottom-up, as glReadPixels produces them */
+    int width, height;
+    int cap_pixels;
+    bool has_frame;
+} disp_readback;
+
+void nv2a_gl_display_readback_set_enabled(bool enable)
+{
+    if (!disp_readback.inited) {
+        qemu_mutex_init(&disp_readback.lock);
+        disp_readback.inited = true;
+    }
+    disp_readback.enabled = enable;
+}
+
+bool nv2a_gl_get_display_frame(uint32_t *dst, int dst_cap_pixels,
+                               int *out_width, int *out_height)
+{
+    if (!disp_readback.inited || !disp_readback.enabled) {
+        return false;
+    }
+    qemu_mutex_lock(&disp_readback.lock);
+    int w = disp_readback.width, h = disp_readback.height;
+    if (!disp_readback.has_frame || w <= 0 || h <= 0 ||
+        w * h > dst_cap_pixels) {
+        qemu_mutex_unlock(&disp_readback.lock);
+        return false;
+    }
+    /* flip rows: stored bottom-up, frontend wants top-down */
+    for (int y = 0; y < h; y++) {
+        memcpy(dst + (size_t)y * w,
+               disp_readback.pixels + (size_t)(h - 1 - y) * w,
+               (size_t)w * sizeof(uint32_t));
+    }
+    *out_width = w;
+    *out_height = h;
+    qemu_mutex_unlock(&disp_readback.lock);
+    return true;
+}
+
+/* Runs on the PFIFO thread with the display context current. */
+static void capture_display_frame(NV2AState *d)
+{
+    PGRAPHGLState *r = d->pgraph.gl_renderer_state;
+    int w = r->gl_display_buffer_width;
+    int h = r->gl_display_buffer_height;
+    if (w <= 0 || h <= 0 || !r->gl_display_buffer) {
+        return;
+    }
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, r->disp_rndr.fbo);
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, r->gl_display_buffer, 0);
+
+    qemu_mutex_lock(&disp_readback.lock);
+    if (disp_readback.cap_pixels < w * h) {
+        disp_readback.pixels = g_realloc(disp_readback.pixels,
+                                         (size_t)w * h * sizeof(uint32_t));
+        disp_readback.cap_pixels = w * h;
+    }
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV,
+                 disp_readback.pixels);
+    disp_readback.width = w;
+    disp_readback.height = h;
+    disp_readback.has_frame = true;
+    qemu_mutex_unlock(&disp_readback.lock);
+
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, 0, 0);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    display_drain_gl_errors("capture_display_frame");
+
+    /* Debug: dump captured frames as PPM when XEMU_DUMP_DISPLAY is set */
+    {
+        static int dump_count;
+        const char *dump_dir = getenv("XEMU_DUMP_DISPLAY");
+        if (dump_dir && (++dump_count % 300) == 150) {
+            char path[512];
+            snprintf(path, sizeof(path), "%s/disp_%06d.ppm",
+                     dump_dir, dump_count);
+            FILE *f = fopen(path, "wb");
+            if (f) {
+                fprintf(f, "P6\n%d %d\n255\n", w, h);
+                /* write top-down (flip rows) */
+                for (int y = h - 1; y >= 0; y--) {
+                    for (int x = 0; x < w; x++) {
+                        uint32_t px = disp_readback.pixels[(size_t)y * w + x];
+                        uint8_t rgb[3] = { (px >> 16) & 0xff,
+                                           (px >> 8) & 0xff, px & 0xff };
+                        fwrite(rgb, 1, 3, f);
+                    }
+                }
+                fclose(f);
+            }
+        }
+    }
+}
+#endif /* LIBRETRO */
+
 void pgraph_gl_init_display(NV2AState *d)
 {
     struct PGRAPHState *pg = &d->pgraph;
@@ -103,7 +234,7 @@ void pgraph_gl_init_display(NV2AState *d)
     glBufferData(GL_ARRAY_BUFFER, 0, NULL, GL_STATIC_DRAW);
     glGenFramebuffers(1, &r->disp_rndr.fbo);
     glGenTextures(1, &r->disp_rndr.pvideo_tex);
-    assert(glGetError() == GL_NO_ERROR);
+    display_drain_gl_errors("pgraph_gl_init_display");
 
     glo_set_current(g_nv2a_context_render);
 }
@@ -336,7 +467,7 @@ static void render_display(NV2AState *d, SurfaceBinding *surface)
         GL_TEXTURE_2D, r->gl_display_buffer, 0);
     GLenum DrawBuffers[1] = {GL_COLOR_ATTACHMENT0};
     glDrawBuffers(1, DrawBuffers);
-    assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+    pgraph_gl_check_fbo(__func__);
 
     glBindTexture(GL_TEXTURE_2D, surface->gl_buffer);
     glBindVertexArray(r->disp_rndr.vao);
@@ -388,13 +519,48 @@ void pgraph_gl_sync(NV2AState *d)
     /* Wait for queued commands to complete */
     pgraph_gl_upload_surface_data(d, surface, !tcg_enabled());
     gl_fence();
-    assert(glGetError() == GL_NO_ERROR);
+    display_drain_gl_errors("pgraph_gl_sync/upload");
+
+#ifdef LIBRETRO
+    /* Display-path diagnostics: log the parameters that drive the display
+     * shader's Y-flip so orientation bugs can be attributed. */
+    {
+        static int sync_count;
+        static int dbg = -1;
+        if (dbg < 0) {
+            const char *v = getenv("XEMU_DEBUG");
+            dbg = (v && v[0] && v[0] != '0') ? 1 : 0;
+        }
+        sync_count++;
+        if (dbg && (sync_count <= 5 || (sync_count % 300) == 0)) {
+            unsigned int dw = 0, dh = 0;
+            VGADisplayParams p;
+            d->vga.get_resolution(&d->vga, (int *)&dw, (int *)&dh);
+            d->vga.get_params(&d->vga, &p);
+            int lo = p.line_offset ? surface->pitch / p.line_offset : 1;
+            fprintf(stderr,
+                    "[nv2a] disp#%d: surf=%dx%d pitch=%d vga=%ux%u "
+                    "line_offset_param=%d lo=%d swizzle=%d pv=%d\n",
+                    sync_count, surface->width, surface->height,
+                    surface->pitch, dw, dh, (int)p.line_offset, lo,
+                    surface->swizzle,
+                    (d->pvideo.regs[NV_PVIDEO_BUFFER] &
+                     NV_PVIDEO_BUFFER_0_USE) != 0);
+        }
+    }
+#endif
 
     /* Render framebuffer in display context */
     glo_set_current(g_nv2a_context_display);
     render_display(d, surface);
     gl_fence();
-    assert(glGetError() == GL_NO_ERROR);
+    display_drain_gl_errors("pgraph_gl_sync/render_display");
+
+#ifdef LIBRETRO
+    if (disp_readback.enabled) {
+        capture_display_frame(d);
+    }
+#endif
 
     /* Switch back to original context */
     glo_set_current(g_nv2a_context_render);

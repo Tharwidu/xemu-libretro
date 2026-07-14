@@ -306,7 +306,7 @@ void pgraph_gl_shader_write_cache_reload_list(PGRAPHState *pg)
 
 bool pgraph_gl_shader_load_from_memory(ShaderBinding *binding)
 {
-    assert(glGetError() == GL_NO_ERROR);
+    pgraph_gl_check_error(__func__);
 
     if (!binding->program) {
         return false;
@@ -682,7 +682,7 @@ void pgraph_gl_shader_cache_to_disk(ShaderBinding *binding)
     GLsizei program_size_copied;
     glGetProgramBinary(binding->gl_program, program_size, &program_size_copied,
                        &binding->program_format, binding->program);
-    assert(glGetError() == GL_NO_ERROR);
+    pgraph_gl_check_error(__func__);
 
     binding->program_size = program_size_copied;
     binding->cached = true;
@@ -736,7 +736,7 @@ static void apply_uniform_updates(const UniformInfo *info, int *locs,
         }
     }
 
-    assert(glGetError() == GL_NO_ERROR);
+    pgraph_gl_check_error(__func__);
 }
 
 // FIXME: Dirty tracking

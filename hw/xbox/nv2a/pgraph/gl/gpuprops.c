@@ -177,7 +177,7 @@ static uint8_t *render_geom_shader_triangles(int width, int height)
                               GL_RENDERBUFFER, rbo);
     check_gl_error("glFramebufferRenderbuffer");
 
-    assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+    pgraph_gl_check_fbo(__func__);
 
     GLuint shader_prog = create_program(
         vertex_shader_source, geometry_shader_source, fragment_shader_source);

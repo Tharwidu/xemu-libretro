@@ -22,6 +22,9 @@
 #include "hw/xbox/nv2a/nv2a.h"
 
 #include <epoxy/gl.h>
+#if defined(_WIN32)
+#include <epoxy/wgl.h>
+#endif
 
 #include "libretro.h"
 #if defined(_WIN32) && !defined(VK_USE_PLATFORM_WIN32_KHR)
@@ -166,6 +169,17 @@ static bool opt_cache_shaders = true;
 static int  opt_filtering = CONFIG_DISPLAY_FILTERING_LINEAR;
 static int  opt_audio_volume = 100;
 static int  opt_network_backend = 0; /* 0=disabled, 1=nat */
+static int  opt_frame_output = 0; /* 0=auto, 1=hardware, 2=software */
+
+/* Optional software frame output (delivers memory frames instead of the
+ * hardware FBO; available via the xemu_frame_output core option). */
+static bool frame_readback = false;
+/* True when launched by EmuVR (its RetroArch runs with vsync and audio sync
+ * disabled, so the core must pace itself). */
+static bool emuvr_env = false;
+#define READBACK_MAX_W 1920
+#define READBACK_MAX_H 1080
+static uint32_t readback_frame[READBACK_MAX_W * READBACK_MAX_H];
 
 /* ========================================================================= */
 /* Forward declarations                                                      */
@@ -173,6 +187,7 @@ static int  opt_network_backend = 0; /* 0=disabled, 1=nat */
 
 static void context_reset(void);
 static void context_destroy(void);
+static void libretro_drain_audio(void);
 static void update_variables(void);
 static void create_blit_resources(void);
 static void destroy_blit_resources(void);
@@ -756,6 +771,14 @@ static void update_variables(void)
         else                              opt_filtering = CONFIG_DISPLAY_FILTERING_LINEAR;
     }
 
+    var.key = "xemu_frame_output";
+    var.value = NULL;
+    if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+        if (!strcmp(var.value, "hardware"))      opt_frame_output = 1;
+        else if (!strcmp(var.value, "software")) opt_frame_output = 2;
+        else                                     opt_frame_output = 0;
+    }
+
     var.key = "xemu_audio_volume";
     var.value = NULL;
     if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
@@ -1282,9 +1305,32 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
         environ_cb(RETRO_ENVIRONMENT_SET_SERIALIZATION_QUIRKS, &quirks);
     }
 
+    /* Resolve frame output mode first. In software mode the core is fully
+     * self-contained (private GL contexts + CPU readback on the PFIFO
+     * thread); no frontend hardware render context is requested at all. */
+    {
+        bool emuvr_detected = false;
+#ifdef _WIN32
+        const char *cmdline = GetCommandLineA();
+        if (cmdline && strstr(cmdline, "--emuvr")) {
+            emuvr_detected = true;
+        }
+#endif
+        /* EmuVR captures hardware cores fine (verified against
+         * mupen64plus/dolphin/pcsx2 in the same environment), so 'auto'
+         * uses the hardware path everywhere; software readback stays
+         * available via the core option as a fallback. */
+        frame_readback = (opt_frame_output == 2);
+        emuvr_env = emuvr_detected;
+        LRLOG_INFO("[xemu] Frame output: %s%s\n",
+                   frame_readback ? "software readback (self-contained GL)"
+                                  : "hardware",
+                   emuvr_detected ? " (EmuVR detected)" : "");
+    }
+
     /* Query the frontend's preferred HW render context */
     unsigned preferred_hw = RETRO_HW_CONTEXT_OPENGL_CORE;
-    if (environ_cb) {
+    if (!frame_readback && environ_cb) {
         environ_cb(RETRO_ENVIRONMENT_GET_PREFERRED_HW_RENDER, &preferred_hw);
     }
     LRLOG_INFO("[xemu] Frontend preferred HW render: %u\n", preferred_hw);
@@ -1302,6 +1348,15 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
     }
 #endif
 
+    if (frame_readback) {
+        /* Pure software core: the frontend must render our frames itself
+         * (RA 1.7.5 won't display memory frames while a HW context is
+         * negotiated). The emulator's GL contexts are created isolated,
+         * with the frontend's pixel format discovered by enumerating our
+         * process's windows (correct rendering depends on the pixel
+         * format; sharing is avoided — broken under Proton). */
+        use_vulkan = false;
+    } else {
     /* Setup hardware rendering based on frontend preference */
     memset(&hw_render, 0, sizeof(hw_render));
     hw_render.context_reset      = context_reset;
@@ -1317,9 +1372,15 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
         hw_render.version_major = 1;
         hw_render.version_minor = 3;
     } else {
-        LRLOG_INFO("[xemu] Requesting OpenGL Core 4.0 HW context\n");
-        hw_render.context_type = RETRO_HW_CONTEXT_OPENGL_CORE;
-        hw_render.version_major = 4;
+        /* Request a legacy GL context like mupen64plus does: drivers hand
+         * back their highest compatibility context (e.g. 4.6), which has
+         * every 4.0 feature we need. Strict core-4.0 contexts are the odd
+         * configuration in the wild (FBO quirks under wine WGL; the only
+         * context type EmuVR's capture doesn't handle). Fallback below
+         * still tries core 4.0 if the frontend rejects this. */
+        LRLOG_INFO("[xemu] Requesting OpenGL (compatibility) HW context\n");
+        hw_render.context_type = RETRO_HW_CONTEXT_OPENGL;
+        hw_render.version_major = 0;
         hw_render.version_minor = 0;
     }
 
@@ -1335,15 +1396,15 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
         hw_render.cache_context      = true;
 
         if (want_vulkan) {
-            hw_render.context_type = RETRO_HW_CONTEXT_OPENGL_CORE;
-            hw_render.version_major = 4;
+            hw_render.context_type = RETRO_HW_CONTEXT_OPENGL;
+            hw_render.version_major = 0;
             hw_render.version_minor = 0;
             want_vulkan = false;
         } else {
-            hw_render.context_type = RETRO_HW_CONTEXT_VULKAN;
-            hw_render.version_major = 1;
-            hw_render.version_minor = 3;
-            want_vulkan = true;
+            /* Legacy GL rejected: try strict core 4.0 */
+            hw_render.context_type = RETRO_HW_CONTEXT_OPENGL_CORE;
+            hw_render.version_major = 4;
+            hw_render.version_minor = 0;
         }
 
         if (!environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render)) {
@@ -1359,9 +1420,18 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
         LRLOG_INFO("[xemu] Using OpenGL HW rendering\n");
         environ_cb(RETRO_ENVIRONMENT_SET_HW_SHARED_CONTEXT, NULL);
     }
+    } /* !frame_readback */
 
     /* Populate xemu config from core options */
     populate_config(opt_dvd_path);
+
+    if (frame_readback) {
+        nv2a_gl_display_readback_set_enabled(true);
+        LRLOG_INFO("[xemu] Software output; GL context setup deferred to first retro_run\n");
+    } else if (getenv("XEMU_DUMP_DISPLAY")) {
+        /* Debug: enable the capture (and its PPM dump) in HW mode too */
+        nv2a_gl_display_readback_set_enabled(true);
+    }
 
     /* Start emulation thread */
     emu_thread_running = true;
@@ -1397,12 +1467,107 @@ RETRO_API void retro_unload_game(void)
     emu_initialized = false;
 }
 
+/*
+ * VGA framebuffer fallback: non-3D content (boot splash, many game menus,
+ * some FMV) is rendered by the VGA scanout path into the QEMU console's
+ * DisplaySurface, never touching the NV2A 3D display pipeline. Mirror that
+ * surface into a shared buffer (QEMU thread, BQL held) so retro_run can
+ * present it whenever no 3D surface exists — the libretro equivalent of
+ * upstream xemu's VGA fallback in ui/xemu.c.
+ */
+static QemuMutex vga_fb_lock;
+static bool vga_fb_lock_inited;
+static uint32_t *vga_fb_pixels;
+static int vga_fb_w, vga_fb_h, vga_fb_cap;
+static uint32_t vga_fb_seq;
+
+static void libretro_copy_vga_surface(QemuConsole *con)
+{
+    DisplaySurface *ds = qemu_console_surface(con);
+    if (!ds) {
+        return;
+    }
+    int w = surface_width(ds);
+    int h = surface_height(ds);
+    int stride = surface_stride(ds);
+    pixman_format_code_t fmt = surface_format(ds);
+    uint8_t *data = surface_data(ds);
+
+    if (!data || w <= 0 || h <= 0 ||
+        (fmt != PIXMAN_x8r8g8b8 && fmt != PIXMAN_a8r8g8b8)) {
+        return;
+    }
+
+    if (!vga_fb_lock_inited) {
+        qemu_mutex_init(&vga_fb_lock);
+        vga_fb_lock_inited = true;
+    }
+
+    qemu_mutex_lock(&vga_fb_lock);
+    if (vga_fb_cap < w * h) {
+        vga_fb_pixels = g_realloc(vga_fb_pixels,
+                                  (size_t)w * h * sizeof(uint32_t));
+        vga_fb_cap = w * h;
+    }
+    /* DisplaySurface rows are top-down: already libretro's convention */
+    for (int y = 0; y < h; y++) {
+        memcpy(vga_fb_pixels + (size_t)y * w, data + (size_t)y * stride,
+               (size_t)w * sizeof(uint32_t));
+    }
+    vga_fb_w = w;
+    vga_fb_h = h;
+    vga_fb_seq++;
+    qemu_mutex_unlock(&vga_fb_lock);
+}
+
+/* Runs on the emulator thread (scheduled from retro_run). */
+static void libretro_vblank_update(void *opaque)
+{
+    QemuConsole *con = (QemuConsole *)opaque;
+    graphic_hw_update(con);
+    /* Mirror the VGA scanout for both output modes: presented whenever
+     * no NV2A surface exists (upstream xemu's fallback). */
+    libretro_copy_vga_surface(con);
+}
+
+/* Called from retro_run (frontend thread). */
+static bool libretro_get_vga_frame(uint32_t *dst, int cap_pixels,
+                                   int *out_w, int *out_h)
+{
+    if (!vga_fb_lock_inited) {
+        return false;
+    }
+    qemu_mutex_lock(&vga_fb_lock);
+    int w = vga_fb_w, h = vga_fb_h;
+    if (!vga_fb_pixels || w <= 0 || h <= 0 || w * h > cap_pixels) {
+        qemu_mutex_unlock(&vga_fb_lock);
+        return false;
+    }
+    memcpy(dst, vga_fb_pixels, (size_t)w * h * sizeof(uint32_t));
+    *out_w = w;
+    *out_h = h;
+    qemu_mutex_unlock(&vga_fb_lock);
+    return true;
+}
+
+/* Verbose per-frame diagnostics, enabled with XEMU_DEBUG=1 in the
+ * environment. Quiet by default for release. */
+static bool xemu_debug_logs(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *v = getenv("XEMU_DEBUG");
+        cached = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    return cached;
+}
+
 RETRO_API void retro_run(void)
 {
     static int run_count = 0;
     run_count++;
     qatomic_set(&last_retro_run_us, g_get_monotonic_time());
-    if (run_count <= 5 || (run_count % 300) == 0) {
+    if (xemu_debug_logs() && (run_count <= 5 || (run_count % 300) == 0)) {
         LRLOG_INFO("[xemu] retro_run #%d (emu_init=%d ctx_ready=%d game=%d)\n",
                    run_count, emu_initialized, context_ready, game_loaded);
     }
@@ -1431,12 +1596,13 @@ RETRO_API void retro_run(void)
         next_frame_us += frame_us;
     }
 
-    /* Schedule vblank (graphic_hw_update) on emu thread */
+    /* Schedule vblank (graphic_hw_update + VGA scanout mirror) on the
+     * emulator thread */
     {
         QemuConsole *con = nv2a_get_vga_console();
         if (con) {
             aio_bh_schedule_oneshot(qemu_get_aio_context(),
-                                    (void(*)(void *))graphic_hw_update, con);
+                                    libretro_vblank_update, con);
         }
     }
 
@@ -1451,9 +1617,48 @@ RETRO_API void retro_run(void)
         input_poll_cb();
     }
 
+#ifdef _WIN32
+    /* Software mode: one-time GL setup. Discover the frontend's window
+     * pixel format (its GL window lives in our process) and create the
+     * emulator's isolated contexts with it. */
+    if (frame_readback && !context_ready) {
+        extern void libretro_gl_set_isolated_mode(int pf, void *dc);
+        extern void libretro_gl_wake_pfifo(void);
+        int pf = 0;
+        HDC frontend_dc = NULL;
+        HWND hwnd = NULL;
+        while ((hwnd = FindWindowExA(NULL, hwnd, NULL, NULL)) != NULL) {
+            DWORD pid = 0;
+            GetWindowThreadProcessId(hwnd, &pid);
+            if (pid != GetCurrentProcessId()) {
+                continue;
+            }
+            HDC dc = GetDC(hwnd);
+            if (dc) {
+                int wpf = GetPixelFormat(dc);
+                if (wpf > 0) {
+                    pf = wpf;
+                    frontend_dc = dc; /* keep: used for format description */
+                    break;
+                }
+                ReleaseDC(hwnd, dc);
+            }
+        }
+        LRLOG_INFO("[xemu] Frontend window pixel format: %d%s\n", pf,
+                   pf > 0 ? "" : " (not found; using defaults)");
+        libretro_gl_set_isolated_mode(pf, frontend_dc);
+        nv2a_context_init();
+        libretro_gl_wake_pfifo();
+        context_ready = true;
+    }
+#endif
+
     if (!emu_initialized || !context_ready) {
         /* Emulator not ready yet, draw black frame */
-        if (!use_vulkan && hw_render.get_current_framebuffer) {
+        if (frame_readback) {
+            /* readback_frame is zero-initialized = black */
+            video_cb(readback_frame, 640, 480, 640 * sizeof(uint32_t));
+        } else if (!use_vulkan && hw_render.get_current_framebuffer) {
             uintptr_t fbo = hw_render.get_current_framebuffer();
             glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)fbo);
             glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
@@ -1475,8 +1680,64 @@ RETRO_API void retro_run(void)
         return;
     }
 
-    /* ---- OpenGL path ---- */
-    if (!use_vulkan) {
+    /* Audio first: keeps sound continuous even when the display sync below
+     * blocks (heavy titles running behind real time). */
+    libretro_drain_audio();
+
+    /* ---- Software readback path ---- */
+    if (frame_readback) {
+        /* Mirror the proven hardware path exactly: the full
+         * get_framebuffer_surface cycle validates the surface at the
+         * display address, maintains its frame_time (surface-cache aging
+         * depends on it — skipping this causes wrong/stale surface
+         * selection: black menus, misoriented FMV), and blocks until
+         * render_display has completed, at which point our PFIFO-side
+         * capture holds exactly the frame the HW path would blit. */
+        int pg_tex = 0;
+        if (emu_initialized) {
+            pg_tex = nv2a_get_framebuffer_surface();
+            nv2a_release_framebuffer_surface();
+        }
+
+        int w = 0, h = 0;
+        bool got = false;
+        bool used_vga = false;
+
+        if (pg_tex) {
+            got = nv2a_gl_get_display_frame(readback_frame,
+                                            READBACK_MAX_W * READBACK_MAX_H,
+                                            &w, &h);
+        }
+
+        if (!got) {
+            /* No 3D surface at the display address: present the VGA
+             * scanout surface — verbatim upstream xemu's fallback. */
+            int vw = 0, vh = 0;
+            if (libretro_get_vga_frame(readback_frame,
+                                       READBACK_MAX_W * READBACK_MAX_H,
+                                       &vw, &vh)) {
+                w = vw;
+                h = vh;
+                got = true;
+                used_vga = true;
+            }
+        }
+
+        if (xemu_debug_logs() && (run_count <= 5 || (run_count % 600) == 0)) {
+            LRLOG_INFO("[xemu] sw-frame#%d: got=%d %dx%d src=%s tex=%d\n",
+                       run_count, got, w, h,
+                       used_vga ? "vga" : "pgraph", pg_tex);
+        }
+        if (got) {
+            video_cb(readback_frame, w, h, w * sizeof(uint32_t));
+        } else {
+            /* No display frame yet: show black */
+            memset(readback_frame, 0, 640 * 480 * sizeof(uint32_t));
+            video_cb(readback_frame, 640, 480, 640 * sizeof(uint32_t));
+        }
+    }
+    /* ---- OpenGL HW path ---- */
+    else if (!use_vulkan) {
         /* Get NV2A framebuffer texture */
         GLuint tex = nv2a_get_framebuffer_surface();
         uintptr_t fbo = hw_render.get_current_framebuffer();
@@ -1487,11 +1748,36 @@ RETRO_API void retro_run(void)
         if (tex) {
             blit_nv2a_texture(tex, width, height, fbo);
         } else {
-            /* No framebuffer yet */
-            glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)fbo);
-            glClearColor(0.0f, 0.0f, 0.2f, 1.0f);
-            glClear(GL_COLOR_BUFFER_BIT);
-            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            /* No NV2A surface: present the VGA scanout (boot/legal/menu
+             * screens rendered CPU-side) — upstream xemu's fallback path.
+             * Rows are flipped to match the blit's texture conventions. */
+            int vw = 0, vh = 0;
+            static GLuint vga_tex;
+            static uint32_t vga_stage[READBACK_MAX_W * READBACK_MAX_H];
+            if (libretro_get_vga_frame(vga_stage,
+                                       READBACK_MAX_W * READBACK_MAX_H,
+                                       &vw, &vh)) {
+                for (int y = 0; y < vh; y++) {
+                    memcpy(readback_frame + (size_t)(vh - 1 - y) * vw,
+                           vga_stage + (size_t)y * vw,
+                           (size_t)vw * sizeof(uint32_t));
+                }
+                if (!vga_tex) {
+                    glGenTextures(1, &vga_tex);
+                }
+                glBindTexture(GL_TEXTURE_2D, vga_tex);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, vw, vh, 0,
+                             GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV,
+                             readback_frame);
+                glBindTexture(GL_TEXTURE_2D, 0);
+                blit_nv2a_texture(vga_tex, width, height, fbo);
+            } else {
+                /* Nothing at all yet: dark blue */
+                glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)fbo);
+                glClearColor(0.0f, 0.0f, 0.2f, 1.0f);
+                glClear(GL_COLOR_BUFFER_BIT);
+                glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            }
         }
 
         nv2a_release_framebuffer_surface();
@@ -1559,7 +1845,15 @@ RETRO_API void retro_run(void)
     }
 
 vk_audio:
-    /* Pull audio from the APU ring buffer */
+    ; /* audio drained at the top of retro_run */
+}
+
+/* Pull audio from the APU ring buffer (hw/xbox/mcpx/apu/monitor.c) and hand
+ * it to the frontend. Runs BEFORE any video work each retro_run: the display
+ * sync can block for a while when emulation runs behind (heavy titles), and
+ * draining audio first keeps sound continuous through those stalls. */
+static void libretro_drain_audio(void)
+{
     if (audio_batch_cb) {
         extern int libretro_audio_pull(int16_t *out_buf, int max_frames);
         extern void libretro_audio_flush(void);
@@ -1571,26 +1865,37 @@ vk_audio:
             audio_flushed = true;
         }
 
-        /* Pull available frames, skip excess to stay near real-time */
+        /* Drain the whole backlog each call and let the frontend's
+         * audio-sync rate control pace us. Fixed-size pulls (the old
+         * 801-frame cap) underrun or force discards whenever the
+         * frontend's retro_run cadence doesn't match 59.94 Hz exactly,
+         * which is audible as crackle. */
         extern int libretro_audio_ring_frames(void);
         int avail = libretro_audio_ring_frames();
 
-        if (avail > 1600) {
-            int16_t discard_buf[1602];
-            int skip = avail - 801; /* leave ~801 frames to pull */
+        /* Skip ahead only on a genuine stall (>100ms backlog), e.g. after
+         * pause or fast-forward; keep ~33ms so playback stays seamless. */
+        if (avail > 4800) {
+            int16_t discard_buf[1024];
+            int skip = avail - 1600;
             while (skip > 0) {
-                int chunk = skip > 801 ? 801 : skip;
+                int chunk = skip > 512 ? 512 : skip;
                 libretro_audio_pull(discard_buf, chunk);
                 skip -= chunk;
             }
             avail = libretro_audio_ring_frames();
         }
 
-        int16_t audio_buf[1602]; /* 801 stereo frames */
-        int frames = libretro_audio_pull(audio_buf, 801);
-
-        if (frames > 0) {
+        /* Push in modest chunks; some audio drivers dislike huge batches. */
+        while (avail > 0) {
+            int16_t audio_buf[512 * 2];
+            int want = avail > 512 ? 512 : avail;
+            int frames = libretro_audio_pull(audio_buf, want);
+            if (frames <= 0) {
+                break;
+            }
             audio_batch_cb(audio_buf, frames);
+            avail -= frames;
         }
     }
 }

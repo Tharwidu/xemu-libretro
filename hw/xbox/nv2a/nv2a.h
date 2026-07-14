@@ -32,6 +32,14 @@ void nv2a_get_vk_display_info(void **out_handle, int *out_width, int *out_height
 /* Non-blocking: trigger PFIFO to render display image, returns immediately.
  * The display image will be updated asynchronously by the PFIFO thread. */
 void nv2a_trigger_display_render(void);
+/* Self-contained display readback (GL renderer): when enabled, the PFIFO
+ * thread copies each rendered display frame to CPU memory so the frontend
+ * can consume plain software frames without touching xemu's GL contexts. */
+void nv2a_gl_display_readback_set_enabled(bool enable);
+/* Copies the newest frame (rows top-down, XRGB8888) into dst if it fits in
+ * dst_cap_pixels. Returns false if no frame yet or it doesn't fit. */
+bool nv2a_gl_get_display_frame(uint32_t *dst, int dst_cap_pixels,
+                               int *out_width, int *out_height);
 #endif
 void nv2a_set_surface_scale_factor(unsigned int scale);
 unsigned int nv2a_get_surface_scale_factor(void);

@@ -36,7 +36,22 @@ static void early_context_init(void)
     // context is created so the temporary context will not become the thread
     // context. After destroying the context, some a durable context should be
     // selected.
-#ifndef LIBRETRO
+#ifdef LIBRETRO
+    /* Geometry-shader winding detection. Without it the winding defaults
+     * are wrong for many GPUs and geometry-shader-emitted primitives get
+     * culled (missing meshes). This runs on the frontend's thread during
+     * context setup, so save and restore its current GL context. */
+    {
+        void *prev = glo_save_current();
+        GloContext *context = glo_context_create();
+        if (context) {
+            glo_set_current(context);
+            pgraph_gl_determine_gpu_properties();
+            glo_context_destroy(context);
+        }
+        glo_restore_current(prev);
+    }
+#else
     GloContext *context = glo_context_create();
     pgraph_gl_determine_gpu_properties();
     glo_context_destroy(context);

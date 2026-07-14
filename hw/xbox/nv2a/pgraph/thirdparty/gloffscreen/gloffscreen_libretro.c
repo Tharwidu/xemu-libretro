@@ -107,6 +107,37 @@ void libretro_gl_set_standalone_mode(void)
     g_libretro_gl_ready = true;
 }
 
+/*
+ * Isolated mode: like standalone (no sharing with the frontend's context —
+ * cross-context sharing is broken under some wine/Proton versions), but
+ * using the frontend's pixel format for our hidden windows, captured via
+ * libretro_gl_prepare(). Rendering behaves differently on contexts created
+ * from ChoosePixelFormat defaults; matching the frontend's format gives the
+ * same GL environment the proven hardware path runs in.
+ */
+
+/* Diagnostic context-creation logging, enabled with XEMU_DEBUG=1 */
+static bool glo_debug(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *v = getenv("XEMU_DEBUG");
+        cached = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    return cached;
+}
+
+static bool g_isolated_use_ra_pf = false;
+static int g_isolated_pf = 0;
+
+void libretro_gl_set_isolated_mode(int pf, void *frontend_dc)
+{
+    g_isolated_pf = pf;
+    g_retroarch_hdc = (HDC)frontend_dc;
+    g_isolated_use_ra_pf = true;
+    libretro_gl_set_standalone_mode();
+}
+
 void libretro_gl_wait_ready(void)
 {
     if (g_libretro_gl_ready) return;
@@ -148,16 +179,26 @@ GloContext *glo_context_create(void)
     context->hdc = GetDC(context->hwnd);
 
     if (g_standalone_gl_mode) {
-        PIXELFORMATDESCRIPTOR pfd = {0};
-        pfd.nSize = sizeof(pfd);
-        pfd.nVersion = 1;
-        pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
-        pfd.iPixelType = PFD_TYPE_RGBA;
-        pfd.cColorBits = 32;
-        pfd.cDepthBits = 24;
-        pfd.cStencilBits = 8;
-        int pf = ChoosePixelFormat(context->hdc, &pfd);
-        SetPixelFormat(context->hdc, pf, &pfd);
+        int iso_pf = g_isolated_pf > 0 ? g_isolated_pf : g_ra_pixel_format;
+        if (g_isolated_use_ra_pf && iso_pf > 0) {
+            /* Use the frontend's pixel format (isolated mode) */
+            PIXELFORMATDESCRIPTOR pfd = {0};
+            pfd.nSize = sizeof(pfd);
+            DescribePixelFormat(g_retroarch_hdc ? g_retroarch_hdc : context->hdc,
+                                iso_pf, sizeof(pfd), &pfd);
+            SetPixelFormat(context->hdc, iso_pf, &pfd);
+        } else {
+            PIXELFORMATDESCRIPTOR pfd = {0};
+            pfd.nSize = sizeof(pfd);
+            pfd.nVersion = 1;
+            pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+            pfd.iPixelType = PFD_TYPE_RGBA;
+            pfd.cColorBits = 32;
+            pfd.cDepthBits = 24;
+            pfd.cStencilBits = 8;
+            int pf = ChoosePixelFormat(context->hdc, &pfd);
+            SetPixelFormat(context->hdc, pf, &pfd);
+        }
 
         if (!p_wglCreateContextAttribsARB) {
             HGLRC tmp = wglCreateContext(context->hdc);
@@ -195,6 +236,12 @@ GloContext *glo_context_create(void)
             g_standalone_root_ctx = context;
         }
 
+        if (glo_debug()) {
+            fprintf(stderr, "[glo] ctx=%p mode=%s pf=%d share=%p\n",
+                    (void *)context->hglrc,
+                    g_isolated_use_ra_pf ? "isolated" : "standalone",
+                    GetPixelFormat(context->hdc), (void *)share);
+        }
         return context;
     }
 
@@ -225,14 +272,18 @@ GloContext *glo_context_create(void)
         SetPixelFormat(context->hdc, pf, &pfd);
     }
 
-    int attribs[] = {
-        WGL_CONTEXT_MAJOR_VERSION_ARB, 4,
-        WGL_CONTEXT_MINOR_VERSION_ARB, 0,
-        WGL_CONTEXT_PROFILE_MASK_ARB, WGL_CONTEXT_CORE_PROFILE_BIT_ARB,
-        0
-    };
+    /* Create a context shared with RetroArch's, matching its profile: no
+     * explicit version/profile request — the driver returns its default
+     * (highest compatibility) context, same as a legacy frontend's GL
+     * context. Strict core-4.0 contexts exhibit FBO quirks on wine WGL. */
+    int attribs[] = { 0 };
 
     context->hglrc = p_wglCreateContextAttribsARB(context->hdc, g_retroarch_hglrc, attribs);
+    if (glo_debug()) {
+        fprintf(stderr, "[glo] ctx=%p mode=shared pf=%d share=%p\n",
+                (void *)context->hglrc,
+                GetPixelFormat(context->hdc), (void *)g_retroarch_hglrc);
+    }
     if (!context->hglrc) {
         ReleaseDC(context->hwnd, context->hdc);
         DestroyWindow(context->hwnd);
@@ -250,6 +301,31 @@ void glo_set_current(GloContext *context)
     } else {
         wglMakeCurrent(context->hdc, context->hglrc);
     }
+}
+
+typedef struct GloSavedCurrent {
+    HGLRC hglrc;
+    HDC hdc;
+} GloSavedCurrent;
+
+void *glo_save_current(void)
+{
+    GloSavedCurrent *s = (GloSavedCurrent *)calloc(1, sizeof(*s));
+    if (s) {
+        s->hglrc = wglGetCurrentContext();
+        s->hdc = wglGetCurrentDC();
+    }
+    return s;
+}
+
+void glo_restore_current(void *saved)
+{
+    GloSavedCurrent *s = (GloSavedCurrent *)saved;
+    if (!s) {
+        return;
+    }
+    wglMakeCurrent(s->hdc, s->hglrc);
+    free(s);
 }
 
 void glo_context_destroy(GloContext *context)

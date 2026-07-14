@@ -184,6 +184,21 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         "100"
     },
     {
+        "xemu_frame_output",
+        "Frame Output Mode",
+        NULL,
+        "How frames reach the frontend. 'Auto' uses hardware FBO rendering normally, but switches to software readback when running under EmuVR (whose capture pipeline needs memory frames; fixes black TV screen). Readback costs a little performance.",
+        NULL,
+        "video",
+        {
+            { "auto",     "Auto" },
+            { "hardware", "Hardware (FBO)" },
+            { "software", "Software (readback)" },
+            { NULL, NULL },
+        },
+        "auto"
+    },
+    {
         "xemu_display_filtering",
         "Display Filtering",
         NULL,
@@ -221,6 +236,47 @@ static void libretro_set_core_options(retro_environment_t environ_cb)
         /* Fallback: convert v2 to v1 format */
         /* For simplicity, just set the v2 options and let the frontend handle it */
         environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2, &options_us);
+    } else {
+        /* Legacy v0 fallback (RetroArch <= 1.7.7, incl. EmuVR's 1.7.5):
+         * convert v2 definitions to SET_VARIABLES format
+         * "Label; default_value|value1|value2|..." (default listed first). */
+        #define XEMU_NUM_OPTS (sizeof(option_defs_us) / sizeof(option_defs_us[0]))
+        static struct retro_variable vars[XEMU_NUM_OPTS];
+        static char var_bufs[XEMU_NUM_OPTS][1024];
+        size_t out = 0;
+
+        for (size_t i = 0; option_defs_us[i].key; i++) {
+            const struct retro_core_option_v2_definition *def = &option_defs_us[i];
+            char *buf = var_bufs[out];
+            size_t pos = (size_t)snprintf(buf, sizeof(var_bufs[out]), "%s; ",
+                                          def->desc ? def->desc : def->key);
+
+            /* default value first */
+            if (def->default_value && pos < sizeof(var_bufs[out])) {
+                pos += (size_t)snprintf(buf + pos, sizeof(var_bufs[out]) - pos,
+                                        "%s", def->default_value);
+            }
+            for (size_t v = 0; def->values[v].value &&
+                               v < RETRO_NUM_CORE_OPTION_VALUES_MAX; v++) {
+                if (def->default_value &&
+                    !strcmp(def->values[v].value, def->default_value)) {
+                    continue;
+                }
+                if (pos < sizeof(var_bufs[out])) {
+                    pos += (size_t)snprintf(buf + pos, sizeof(var_bufs[out]) - pos,
+                                            "|%s", def->values[v].value);
+                }
+            }
+
+            vars[out].key = def->key;
+            vars[out].value = buf;
+            out++;
+        }
+        vars[out].key = NULL;
+        vars[out].value = NULL;
+        #undef XEMU_NUM_OPTS
+
+        environ_cb(RETRO_ENVIRONMENT_SET_VARIABLES, vars);
     }
 }
 

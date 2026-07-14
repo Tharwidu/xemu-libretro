@@ -48,6 +48,13 @@ GloContext *glo_context_create(void);
 /* Destroy a previously created OpenGL context */
 void glo_context_destroy(GloContext *context);
 
+#ifdef LIBRETRO
+/* Save/restore whichever context is current on this thread (typically the
+ * frontend's), so temporary contexts can be used during setup. */
+void *glo_save_current(void);
+void glo_restore_current(void *saved);
+#endif
+
 void glo_readpixels(GLenum gl_format, GLenum gl_type,
                     unsigned int bytes_per_pixel, unsigned int stride,
                     unsigned int width, unsigned int height, bool vflip,
