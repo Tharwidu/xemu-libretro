@@ -11,7 +11,7 @@
  *  EGL is preferred (Wayland, KMS, X11/EGL frontends); GLX is used when
  *  the current context turns out to be a GLX one (X11 frontends).
  *
- *  Copyright (c) 2026
+ *  Copyright (c) 2026 Tharwidu
  *  SPDX-License-Identifier: MIT
  */
 
