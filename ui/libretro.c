@@ -56,6 +56,19 @@ static retro_log_printf_t         log_cb       = NULL;
 #define LRLOG_ERROR(...) do { if (log_cb) log_cb(RETRO_LOG_ERROR, __VA_ARGS__); } while(0)
 #define LRLOG_DEBUG(...) do { if (log_cb) log_cb(RETRO_LOG_DEBUG, __VA_ARGS__); } while(0)
 
+/* Log bridge for the gloffscreen backends: their stderr output never
+ * reaches RetroArch's --log-file, so route their diagnostics through the
+ * frontend log callback (thread-safe: RA's log callback is). */
+void libretro_glo_log(const char *fmt, ...)
+{
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    LRLOG_INFO("%s\n", buf);
+}
+
 /* ========================================================================= */
 /* VFS interface (optional)                                                  */
 /* ========================================================================= */
@@ -174,9 +187,6 @@ static int  opt_frame_output = 0; /* 0=auto, 1=hardware, 2=software */
 /* Optional software frame output (delivers memory frames instead of the
  * hardware FBO; available via the xemu_frame_output core option). */
 static bool frame_readback = false;
-/* True when launched by EmuVR (its RetroArch runs with vsync and audio sync
- * disabled, so the core must pace itself). */
-static bool emuvr_env = false;
 #define READBACK_MAX_W 1920
 #define READBACK_MAX_H 1080
 static uint32_t readback_frame[READBACK_MAX_W * READBACK_MAX_H];
@@ -606,6 +616,22 @@ static bool ra_vk_import_display(void *ext_handle, int width, int height)
 
 static void context_reset(void)
 {
+    /* Everything below runs on the frontend's thread with the frontend's
+     * GL context current. nv2a_context_init() -> early_context_init()
+     * leaves the nv2a *display* context current on this thread; that must
+     * be undone before returning:
+     *  (a) frontends that bind their GL context once at init (RetroArch
+     *      1.7.5's gl driver) would keep rendering on OUR context, and
+     *  (b) a WGL/GLX context can only be current on one thread — if the
+     *      frontend thread still holds the display context, the PFIFO
+     *      thread's later MakeCurrent on it fails and its GL calls land
+     *      on the wrong context (access violation on real drivers).
+     * Restore happens BEFORE waking the PFIFO thread so the display
+     * context is guaranteed unbound before the worker binds it. */
+    extern void *glo_save_current(void);
+    extern void glo_restore_current(void *saved);
+    void *prev_ctx = glo_save_current();
+
     if (!use_vulkan) {
         LRLOG_INFO("[xemu] OpenGL context ready, creating blit resources\n");
         create_blit_resources();
@@ -615,6 +641,7 @@ static void context_reset(void)
 
         libretro_gl_prepare();
         nv2a_context_init();
+        glo_restore_current(prev_ctx);
         libretro_gl_wake_pfifo();
     } else {
         if (environ_cb) {
@@ -636,6 +663,7 @@ static void context_reset(void)
 
         libretro_gl_set_standalone_mode();
         nv2a_context_init();
+        glo_restore_current(prev_ctx);
         libretro_gl_wake_pfifo();
     }
 
@@ -1306,27 +1334,24 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
     }
 
     /* Resolve frame output mode first. In software mode the core is fully
-     * self-contained (private GL contexts + CPU readback on the PFIFO
-     * thread); no frontend hardware render context is requested at all. */
-    {
-        bool emuvr_detected = false;
-#ifdef _WIN32
-        const char *cmdline = GetCommandLineA();
-        if (cmdline && strstr(cmdline, "--emuvr")) {
-            emuvr_detected = true;
-        }
-#endif
-        /* EmuVR captures hardware cores fine (verified against
-         * mupen64plus/dolphin/pcsx2 in the same environment), so 'auto'
-         * uses the hardware path everywhere; software readback stays
-         * available via the core option as a fallback. */
-        frame_readback = (opt_frame_output == 2);
-        emuvr_env = emuvr_detected;
-        LRLOG_INFO("[xemu] Frame output: %s%s\n",
-                   frame_readback ? "software readback (self-contained GL)"
-                                  : "hardware",
-                   emuvr_detected ? " (EmuVR detected)" : "");
-    }
+     * self-contained: private, isolated GL contexts + CPU readback on the
+     * PFIFO thread, and no frontend hardware render context is requested at
+     * all. That makes the core immune to the frontend's GL context
+     * lifecycle (RetroArch 1.7.5's gl driver destroys/re-inits its master
+     * context on video re-init, which orphans a shared child context and
+     * faults the PFIFO worker thread on real GPU drivers) and to
+     * cross-context sharing quirks (wine/Proton). It is the portable path
+     * that works across RetroArch builds, GL drivers and OSes with no user
+     * configuration, and it is the memory-frame path EmuVR's capture needs.
+     *
+     * 'auto' and 'software' therefore both use readback; 'hardware' is an
+     * explicit opt-in for the direct-FBO blit (fastest, but only safe on a
+     * frontend/driver that keeps its shared GL context alive across
+     * re-inits — modern RetroArch with the glcore driver). */
+    frame_readback = (opt_frame_output != 1);
+    LRLOG_INFO("[xemu] Frame output: %s\n",
+               frame_readback ? "software readback (self-contained, isolated GL)"
+                              : "hardware (direct FBO)");
 
     /* Query the frontend's preferred HW render context */
     unsigned preferred_hw = RETRO_HW_CONTEXT_OPENGL_CORE;
@@ -1646,8 +1671,16 @@ RETRO_API void retro_run(void)
         }
         LRLOG_INFO("[xemu] Frontend window pixel format: %d%s\n", pf,
                    pf > 0 ? "" : " (not found; using defaults)");
+        /* nv2a_context_init() leaves the nv2a display context current on
+         * this (frontend) thread; restore the frontend's own context
+         * before returning and before waking the PFIFO thread — see the
+         * matching comment in context_reset(). */
+        extern void *glo_save_current(void);
+        extern void glo_restore_current(void *saved);
+        void *prev_ctx = glo_save_current();
         libretro_gl_set_isolated_mode(pf, frontend_dc);
         nv2a_context_init();
+        glo_restore_current(prev_ctx);
         libretro_gl_wake_pfifo();
         context_ready = true;
     }

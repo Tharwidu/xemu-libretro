@@ -45,6 +45,10 @@ struct _GloContext {
 
 typedef HGLRC (WINAPI *PFNWGLCREATECONTEXTATTRIBSARBPROC)(HDC, HGLRC, const int *);
 
+/* Routes gloffscreen diagnostics into the frontend's log (stderr never
+ * reaches RetroArch's --log-file). Defined in ui/libretro.c. */
+extern void libretro_glo_log(const char *fmt, ...);
+
 /* Stored reference to RetroArch's GL context for sharing */
 static HGLRC g_retroarch_hglrc = NULL;
 static HDC   g_retroarch_hdc = NULL;
@@ -180,14 +184,21 @@ GloContext *glo_context_create(void)
 
     if (g_standalone_gl_mode) {
         int iso_pf = g_isolated_pf > 0 ? g_isolated_pf : g_ra_pixel_format;
+        BOOL spf_ok = FALSE;
         if (g_isolated_use_ra_pf && iso_pf > 0) {
             /* Use the frontend's pixel format (isolated mode) */
             PIXELFORMATDESCRIPTOR pfd = {0};
             pfd.nSize = sizeof(pfd);
             DescribePixelFormat(g_retroarch_hdc ? g_retroarch_hdc : context->hdc,
                                 iso_pf, sizeof(pfd), &pfd);
-            SetPixelFormat(context->hdc, iso_pf, &pfd);
-        } else {
+            spf_ok = SetPixelFormat(context->hdc, iso_pf, &pfd);
+        }
+        if (!spf_ok) {
+            /* No frontend pixel format, or it was not valid for our own
+             * hidden window's DC (differing drivers/formats can reject it).
+             * Fall back to a standard format chosen against our own DC so we
+             * never proceed to GL calls on a window with no pixel format —
+             * that path faults on real drivers. */
             PIXELFORMATDESCRIPTOR pfd = {0};
             pfd.nSize = sizeof(pfd);
             pfd.nVersion = 1;
@@ -197,7 +208,19 @@ GloContext *glo_context_create(void)
             pfd.cDepthBits = 24;
             pfd.cStencilBits = 8;
             int pf = ChoosePixelFormat(context->hdc, &pfd);
-            SetPixelFormat(context->hdc, pf, &pfd);
+            spf_ok = (pf > 0) && SetPixelFormat(context->hdc, pf, &pfd);
+            if (glo_debug()) {
+                libretro_glo_log("[glo] pixel-format fallback: iso_pf=%d "
+                                 "chosen=%d set=%d", iso_pf, pf, (int)spf_ok);
+            }
+        }
+        if (!spf_ok) {
+            libretro_glo_log("[glo] ERROR: no usable pixel format for "
+                             "offscreen context");
+            ReleaseDC(context->hwnd, context->hdc);
+            DestroyWindow(context->hwnd);
+            free(context);
+            return NULL;
         }
 
         if (!p_wglCreateContextAttribsARB) {
@@ -237,10 +260,10 @@ GloContext *glo_context_create(void)
         }
 
         if (glo_debug()) {
-            fprintf(stderr, "[glo] ctx=%p mode=%s pf=%d share=%p\n",
-                    (void *)context->hglrc,
-                    g_isolated_use_ra_pf ? "isolated" : "standalone",
-                    GetPixelFormat(context->hdc), (void *)share);
+            libretro_glo_log("[glo] ctx=%p mode=%s pf=%d share=%p",
+                             (void *)context->hglrc,
+                             g_isolated_use_ra_pf ? "isolated" : "standalone",
+                             GetPixelFormat(context->hdc), (void *)share);
         }
         return context;
     }
@@ -280,9 +303,10 @@ GloContext *glo_context_create(void)
 
     context->hglrc = p_wglCreateContextAttribsARB(context->hdc, g_retroarch_hglrc, attribs);
     if (glo_debug()) {
-        fprintf(stderr, "[glo] ctx=%p mode=shared pf=%d share=%p\n",
-                (void *)context->hglrc,
-                GetPixelFormat(context->hdc), (void *)g_retroarch_hglrc);
+        libretro_glo_log("[glo] ctx=%p mode=shared pf=%d share=%p",
+                         (void *)context->hglrc,
+                         GetPixelFormat(context->hdc),
+                         (void *)g_retroarch_hglrc);
     }
     if (!context->hglrc) {
         ReleaseDC(context->hwnd, context->hdc);
@@ -296,10 +320,23 @@ GloContext *glo_context_create(void)
 
 void glo_set_current(GloContext *context)
 {
+    BOOL ok;
     if (context == NULL || context->hglrc == NULL) {
-        wglMakeCurrent(NULL, NULL);
+        ok = wglMakeCurrent(NULL, NULL);
     } else {
-        wglMakeCurrent(context->hdc, context->hglrc);
+        ok = wglMakeCurrent(context->hdc, context->hglrc);
+    }
+    if (!ok) {
+        /* A WGL context can only be current on one thread at a time; a
+         * failure here almost always means another thread still holds
+         * this context. GL calls after a failed MakeCurrent land on
+         * whatever context was previously bound (or none) — that is a
+         * crash on real drivers, so make the failure loud. */
+        libretro_glo_log("[glo] wglMakeCurrent FAILED ctx=%p dc=%p err=%lu "
+                         "(current on another thread?)",
+                         context ? (void *)context->hglrc : NULL,
+                         context ? (void *)context->hdc : NULL,
+                         (unsigned long)GetLastError());
     }
 }
 

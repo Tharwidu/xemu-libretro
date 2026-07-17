@@ -187,7 +187,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         "xemu_frame_output",
         "Frame Output Mode",
         NULL,
-        "How frames reach the frontend. 'Auto' uses hardware FBO rendering normally, but switches to software readback when running under EmuVR (whose capture pipeline needs memory frames; fixes black TV screen). Readback costs a little performance.",
+        "How frames reach the frontend. 'Auto' uses software readback (memory frames) for maximum compatibility across RetroArch builds, GL drivers and OSes, and is what EmuVR's capture needs. 'Hardware (FBO)' is a faster direct-blit path, but only safe on a modern RetroArch/GL stack that keeps its shared GL context alive (older builds such as 1.7.5 can crash the render thread). Readback costs a little performance.",
         NULL,
         "video",
         {
