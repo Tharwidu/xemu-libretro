@@ -1,0 +1,111 @@
+name: Release libretro core
+
+# Builds the Windows and Linux cores and publishes them as a GitHub Release
+# whose assets mirror the upstream danprice142 layout (one zip per platform,
+# each holding the core binary + xemu_libretro.info).
+#
+# Trigger by pushing a tag like v0.1.0-emuvr-preview, or run manually from the
+# Actions tab and supply the version. Releases are marked as prereleases.
+
+on:
+  push:
+    tags: ['v*-emuvr*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version/tag to publish (e.g. v0.1.0-emuvr-preview)
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  windows-core:
+    name: Windows x86_64 core
+    runs-on: ubuntu-24.04
+    container: ghcr.io/xemu-project/xemu-win64-toolchain-gcc:sha-2881edd
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - name: Build core
+        run: |
+          # build.sh exits nonzero after configuring the standalone target;
+          # the core itself is produced by the ninja step.
+          ./build.sh -p win64-cross -Dlibretro=true || true
+          ninja -C build xemu_libretro.dll
+      - name: Package
+        run: |
+          VERSION="${{ inputs.version || github.ref_name }}" \
+            DLL=build/xemu_libretro.dll SO=/nonexistent OUTDIR=dist \
+            scripts/package-libretro-release.sh
+      - uses: actions/upload-artifact@v6
+        with:
+          name: release-win64
+          path: dist/*.zip
+
+  linux-core:
+    name: Linux x86_64 core
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc g++ meson ninja-build cmake curl \
+            libglib2.0-dev libpixman-1-dev libepoxy-dev libvulkan-dev \
+            libx11-dev libgtk-3-dev libssl-dev libsamplerate0-dev \
+            libpcap-dev libslirp-dev libxext-dev libxrandr-dev \
+            libxcursor-dev libxfixes-dev libxi-dev libxss-dev \
+            libwayland-dev libxkbcommon-dev libdrm-dev libgbm-dev \
+            libasound2-dev libpulse-dev
+      - name: Build core
+        run: |
+          mkdir build-linux && cd build-linux
+          ../configure --extra-cflags="-DXBOX=1" --target-list=i386-softmmu \
+            -Dlibretro=true -Db_staticpic=true
+          ninja xemu_libretro.so
+      - name: Package
+        run: |
+          VERSION="${{ inputs.version || github.ref_name }}" \
+            SO=build-linux/xemu_libretro.so DLL=/nonexistent OUTDIR=dist \
+            scripts/package-libretro-release.sh
+      - uses: actions/upload-artifact@v6
+        with:
+          name: release-linux
+          path: dist/*.zip
+
+  publish:
+    name: Publish release
+    needs: [windows-core, linux-core]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v3
+        with:
+          name: xemu libretro ${{ inputs.version || github.ref_name }} (EmuVR preview)
+          tag_name: ${{ inputs.version || github.ref_name }}
+          prerelease: true
+          files: dist/*.zip
+          body: |
+            Unofficial preview build of the xemu libretro core.
+
+            This is a work-in-progress fork focused on Linux/POSIX support and
+            RetroArch 1.7.5 / EmuVR compatibility. It is **not** an official
+            release of danprice142/xemu-libretro or the xemu project, and is
+            not endorsed by either.
+
+            Each archive contains the core plus `xemu_libretro.info`; unzip
+            into your RetroArch `cores/` directory. Windows and Linux x86_64
+            builds are provided.
+
+            Licensed GPLv2, same as xemu. Source: this repository at the
+            tagged commit. Credit to danprice142 (libretro core) and the
+            xemu project (xemu-project/xemu).
