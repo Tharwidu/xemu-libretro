@@ -38,6 +38,7 @@ command -v zip >/dev/null || { echo "error: 'zip' not found" >&2; exit 1; }
 [ -f "$INFO" ] || { echo "error: info file not found: $INFO" >&2; exit 1; }
 
 mkdir -p "$OUTDIR"
+OUTDIR="$(cd "$OUTDIR" && pwd)"   # zip runs from a staging dir; must be absolute
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
