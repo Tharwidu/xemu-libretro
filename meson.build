@@ -1689,6 +1689,7 @@ if not get_option('sdl').auto() or have_system
   if not sdl.found() and not get_option('sdl').disabled()
     sdl3_cmake_opts = cmake.subproject_options()
     sdl3_cmake_opts.add_cmake_defines({
+      'CMAKE_POSITION_INDEPENDENT_CODE': get_option('libretro'),
       'SDL_CAMERA': 'OFF',
       'SDL_DISKAUDIO': 'OFF',
       'SDL_DUMMYVIDEO': 'OFF',

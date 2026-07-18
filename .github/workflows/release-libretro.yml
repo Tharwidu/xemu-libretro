@@ -32,8 +32,11 @@ jobs:
       - name: Build core
         run: |
           # build.sh exits nonzero after configuring the standalone target;
-          # the core itself is produced by the ninja step.
+          # the core itself is produced by the ninja step. Require the ninja
+          # file so a real configure failure stops here with its own error
+          # instead of a confusing ninja one.
           ./build.sh -p win64-cross -Dlibretro=true || true
+          test -f build/build.ninja || { echo '::error::configure failed - see build.sh output above'; exit 1; }
           ninja -C build xemu_libretro.dll
       - name: Package
         run: |

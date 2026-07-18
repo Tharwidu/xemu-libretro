@@ -26,9 +26,24 @@ if not fs.exists(lib)
   src_archive = meson.current_source_dir() / archive
   if not fs.exists(src_archive)
     message('Downloading dsp56300 @0@ for @1@...'.format(ver, rust_target))
-    run_command(find_program('curl'), '-fsSL', url, '-o', src_archive, check: true)
+    curl = find_program('curl', required: false)
+    if curl.found()
+      run_command(curl, '-fsSL', url, '-o', src_archive, check: true)
+    else
+      # No curl (e.g. minimal build containers); python is always present
+      # since meson itself runs on it.
+      python = find_program('python3', 'python')
+      run_command(python, '-c',
+        'import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])',
+        url, src_archive, check: true)
+    endif
   endif
-  run_command('tar', 'xzf', src_archive, '-C', meson.current_build_dir(), check: true)
+  tar_args = ['xzf', src_archive, '-C', meson.current_build_dir()]
+  if build_machine.system() == 'windows'
+    # msys/GNU tar parses "D:/..." as a remote host without this.
+    tar_args += ['--force-local']
+  endif
+  run_command('tar', tar_args, check: true)
 endif
 
 link_args = []
