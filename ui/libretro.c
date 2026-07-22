@@ -1167,6 +1167,39 @@ RETRO_API void retro_deinit(void)
     use_vulkan = false;
 }
 
+/* Log the md5 of a system file and note whether it matches a known-good
+ * dump. Informational only - a mismatch is warned, never fatal, since valid
+ * BIOS/HDD variants exist (e.g. plain vs debug Complex, retail vs xemu HDD). */
+static void log_system_file_hash(const char *label, const char *path,
+                                 const char *const *known_md5, int known_count)
+{
+    GError *err = NULL;
+    char *data = NULL;
+    gsize len = 0;
+    if (!g_file_get_contents(path, &data, &len, &err)) {
+        if (err) g_error_free(err);
+        return;
+    }
+    char *md5 = g_compute_checksum_for_data(G_CHECKSUM_MD5,
+                                            (const guchar *)data, len);
+    bool known = false;
+    for (int i = 0; i < known_count; i++) {
+        if (known_md5[i] && g_ascii_strcasecmp(md5, known_md5[i]) == 0) {
+            known = true;
+            break;
+        }
+    }
+    if (known) {
+        LRLOG_INFO("[xemu] %s md5 %s (known good)\n", label, md5);
+    } else {
+        LRLOG_WARN("[xemu] %s md5 %s is not a recognized dump; continuing "
+                   "anyway (verify the file if the console misbehaves)\n",
+                   label, md5);
+    }
+    g_free(md5);
+    g_free(data);
+}
+
 RETRO_API bool retro_load_game(const struct retro_game_info *game)
 {
     LRLOG_INFO("[xemu] retro_load_game called\n");
@@ -1263,6 +1296,13 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
         }
         fclose(f);
         LRLOG_INFO("[xemu] Found bootrom: %s\n", opt_bootrom_path);
+        {
+            static const char *const mcpx_md5[] = {
+                "d49c52a4102f6df7bcf8d0617ac475ed",  /* MCPX v1.0 */
+            };
+            log_system_file_hash("MCPX boot ROM", opt_bootrom_path, mcpx_md5,
+                                 (int)ARRAY_SIZE(mcpx_md5));
+        }
 
         f = fopen(opt_bios_path, "rb");
         if (!f) {
@@ -1273,6 +1313,13 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
         }
         fclose(f);
         LRLOG_INFO("[xemu] Found bios: %s\n", opt_bios_path);
+        {
+            static const char *const bios_md5[] = {
+                "21445c6f28fca7285b0f167ea770d1e5",  /* Complex 4627 v1.03 */
+            };
+            log_system_file_hash("Xbox BIOS", opt_bios_path, bios_md5,
+                                 (int)ARRAY_SIZE(bios_md5));
+        }
 
         f = fopen(opt_hdd_path, "rb");
         if (!f) {

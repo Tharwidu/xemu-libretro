@@ -31,15 +31,21 @@ disk_control = "false"
 is_experimental = "true"
 
 # Firmware / system files (system/xemu/)
-firmware_count = 3
-firmware0_desc = "mcpx_1.0.bin (MCPX Boot ROM)"
+# The BIOS may be either Complex_4627.bin or the debug Complex_4627v1.03.bin;
+# the core accepts whichever is present. RetroArch lists each firmware entry
+# independently, so both names appear - only one is needed.
+firmware_count = 4
+firmware0_desc = "mcpx_1.0.bin (MCPX v1.0 Boot ROM, required - md5 d49c52a4102f6df7bcf8d0617ac475ed)"
 firmware0_path = "xemu/mcpx_1.0.bin"
 firmware0_opt = "false"
-firmware1_desc = "Complex_4627v1.03.bin (Xbox flash BIOS)"
-firmware1_path = "xemu/Complex_4627v1.03.bin"
+firmware1_desc = "Complex_4627.bin (Xbox flash BIOS, required - or use Complex_4627v1.03.bin instead)"
+firmware1_path = "xemu/Complex_4627.bin"
 firmware1_opt = "false"
-firmware2_desc = "xbox_hdd.qcow2 (Xbox HDD image)"
-firmware2_path = "xemu/xbox_hdd.qcow2"
-firmware2_opt = "false"
+firmware2_desc = "Complex_4627v1.03.bin (debug Xbox flash BIOS, optional alternative - md5 21445c6f28fca7285b0f167ea770d1e5)"
+firmware2_path = "xemu/Complex_4627v1.03.bin"
+firmware2_opt = "true"
+firmware3_desc = "xbox_hdd.qcow2 (Xbox HDD image, required - xemu team's copyright-free or a retail image)"
+firmware3_path = "xemu/xbox_hdd.qcow2"
+firmware3_opt = "false"
 
-notes = "(!) System files go in the RetroArch system/xemu/ directory.|A missing xbox_eeprom.bin is generated on first run.|Content must be xiso format; convert other dumps with extract-xiso.|Save states restore full machine state but do not support rewind, run-ahead or netplay."
+notes = "(!) System files go in the RetroArch system/xemu/ directory.|BIOS: Complex_4627.bin OR the debug Complex_4627v1.03.bin (either works).|The core logs each system file's md5 at load and warns if a BIOS/boot ROM is unrecognized.|A missing xbox_eeprom.bin is generated on first run.|Content must be xiso format; convert other dumps with extract-xiso.|Save states restore full machine state but do not support rewind, run-ahead or netplay."
