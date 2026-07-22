@@ -90,6 +90,20 @@ static void xbox_sha1_compute(SHA1Context *ctx, XboxEEPROMVersion ver,
     sha1_result(ctx, hash);
 }
 
+/* The crypto RNG can be unavailable this early in process life (or broken
+ * on some systems). These are identity fields for an emulated console, not
+ * secrets, so fall back to glib's seeded PRNG - anything beats the previous
+ * behavior, where qcrypto_random_bytes(..., &error_fatal) aborted the whole
+ * host process (the libretro frontend) when the RNG failed. */
+static void xbox_eeprom_random_bytes(uint8_t *buf, size_t len) {
+    if (qcrypto_random_bytes(buf, len, NULL) == 0) {
+        return;
+    }
+    for (size_t i = 0; i < len; i++) {
+        buf[i] = (uint8_t)g_random_int_range(0, 256);
+    }
+}
+
 bool xbox_eeprom_generate(const char *file, XboxEEPROMVersion ver) {
     XboxEEPROM e;
     memset(&e, 0, sizeof(e));
@@ -99,12 +113,12 @@ bool xbox_eeprom_generate(const char *file, XboxEEPROMVersion ver) {
     e.video_standard = cpu_to_le32(0x00400100);
 
     // randomize hardware information
-    qcrypto_random_bytes(e.confounder, sizeof(e.confounder), &error_fatal);
-    qcrypto_random_bytes(e.hdd_key, sizeof(e.hdd_key), &error_fatal);
-    qcrypto_random_bytes(e.online_key, sizeof(e.online_key), &error_fatal);
+    xbox_eeprom_random_bytes(e.confounder, sizeof(e.confounder));
+    xbox_eeprom_random_bytes(e.hdd_key, sizeof(e.hdd_key));
+    xbox_eeprom_random_bytes(e.online_key, sizeof(e.online_key));
     memcpy(e.mac, "\x00\x50\xF2", 3);
-    qcrypto_random_bytes(e.mac + 3, sizeof(e.mac) - 3, &error_fatal);
-    qcrypto_random_bytes(e.serial, sizeof(e.serial), &error_fatal);
+    xbox_eeprom_random_bytes(e.mac + 3, sizeof(e.mac) - 3);
+    xbox_eeprom_random_bytes(e.serial, sizeof(e.serial));
     for (int i = 0; i < sizeof(e.serial); i++) {
         e.serial[i] = '0' + (e.serial[i] % 10);
     }

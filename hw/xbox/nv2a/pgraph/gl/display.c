@@ -62,6 +62,13 @@ static struct {
     int width, height;
     int cap_pixels;
     bool has_frame;
+    /* Async transfer: glReadPixels goes into a PBO (returns without
+     * draining the GPU); the previous frame's PBO is mapped and copied out
+     * on the next capture. One frame of extra latency in the mirror, but
+     * the PFIFO thread no longer stalls on a GPU->CPU sync every frame. */
+    GLuint pbo[2];
+    int pbo_index;
+    int pbo_w[2], pbo_h[2];  /* dimensions of the pending readback, 0=none */
 } disp_readback;
 
 void nv2a_gl_display_readback_set_enabled(bool enable)
@@ -112,19 +119,49 @@ static void capture_display_frame(NV2AState *d)
     glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                            GL_TEXTURE_2D, r->gl_display_buffer, 0);
 
-    qemu_mutex_lock(&disp_readback.lock);
-    if (disp_readback.cap_pixels < w * h) {
-        disp_readback.pixels = g_realloc(disp_readback.pixels,
-                                         (size_t)w * h * sizeof(uint32_t));
-        disp_readback.cap_pixels = w * h;
+    /* Kick this frame's readback into a PBO (asynchronous). */
+    if (!disp_readback.pbo[0]) {
+        glGenBuffers(2, disp_readback.pbo);
+    }
+    int cur = disp_readback.pbo_index;
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, disp_readback.pbo[cur]);
+    if (disp_readback.pbo_w[cur] * disp_readback.pbo_h[cur] < w * h) {
+        glBufferData(GL_PIXEL_PACK_BUFFER, (size_t)w * h * sizeof(uint32_t),
+                     NULL, GL_STREAM_READ);
     }
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
-    glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV,
-                 disp_readback.pixels);
-    disp_readback.width = w;
-    disp_readback.height = h;
-    disp_readback.has_frame = true;
-    qemu_mutex_unlock(&disp_readback.lock);
+    glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, NULL);
+    disp_readback.pbo_w[cur] = w;
+    disp_readback.pbo_h[cur] = h;
+
+    /* Collect the previous frame's readback; its DMA has had a frame to
+     * complete, so the map rarely waits. */
+    int prev = cur ^ 1;
+    int pw = disp_readback.pbo_w[prev], ph = disp_readback.pbo_h[prev];
+    if (pw > 0 && ph > 0) {
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, disp_readback.pbo[prev]);
+        const uint32_t *src = (const uint32_t *)glMapBufferRange(
+            GL_PIXEL_PACK_BUFFER, 0, (size_t)pw * ph * sizeof(uint32_t),
+            GL_MAP_READ_BIT);
+        if (src) {
+            qemu_mutex_lock(&disp_readback.lock);
+            if (disp_readback.cap_pixels < pw * ph) {
+                disp_readback.pixels =
+                    g_realloc(disp_readback.pixels,
+                              (size_t)pw * ph * sizeof(uint32_t));
+                disp_readback.cap_pixels = pw * ph;
+            }
+            memcpy(disp_readback.pixels, src,
+                   (size_t)pw * ph * sizeof(uint32_t));
+            disp_readback.width = pw;
+            disp_readback.height = ph;
+            disp_readback.has_frame = true;
+            qemu_mutex_unlock(&disp_readback.lock);
+            glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+        }
+    }
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    disp_readback.pbo_index = prev;
 
     glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                            GL_TEXTURE_2D, 0, 0);

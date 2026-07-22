@@ -1201,8 +1201,28 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
             LRLOG_INFO("[xemu] Auto-set bootrom: %s\n", opt_bootrom_path);
         }
         if (!opt_bios_path[0]) {
-            snprintf(opt_bios_path, sizeof(opt_bios_path),
-                     "%s/xemu/Complex_4627v1.03.bin", system_dir);
+            /* The Complex 4627 BIOS circulates under a few file names
+             * (v1.03 is the debug build); accept whichever exists. When
+             * none does, the first name is kept so the missing-file
+             * message tells the user the preferred one. */
+            static const char *const bios_names[] = {
+                "Complex_4627v1.03.bin",
+                "Complex_4627.bin",
+            };
+            for (size_t i = 0; i < ARRAY_SIZE(bios_names); i++) {
+                char cand[4096];
+                snprintf(cand, sizeof(cand), "%s/xemu/%s", system_dir,
+                         bios_names[i]);
+                FILE *bf = fopen(cand, "rb");
+                if (bf || i == 0) {
+                    snprintf(opt_bios_path, sizeof(opt_bios_path), "%s",
+                             cand);
+                }
+                if (bf) {
+                    fclose(bf);
+                    break;
+                }
+            }
             LRLOG_INFO("[xemu] Auto-set bios: %s\n", opt_bios_path);
         }
         if (!opt_hdd_path[0]) {
@@ -1266,18 +1286,44 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
         LRLOG_INFO("[xemu] Found hdd: %s\n", opt_hdd_path);
 
         /* EEPROM: generate a fresh one if absent (same as standalone xemu
-         * first-run behavior) rather than failing later. */
+         * first-run behavior) rather than failing later. A wrong-sized file
+         * (e.g. truncated by an earlier failed run) is regenerated too -
+         * checking existence alone let a corrupt file block boot forever. */
+        bool eeprom_ok = false;
         f = fopen(opt_eeprom_path, "rb");
         if (f) {
+            long sz = -1;
+            if (fseek(f, 0, SEEK_END) == 0) {
+                sz = ftell(f);
+            }
             fclose(f);
-        } else if (qcrypto_init(NULL) == 0 &&
-                   xbox_eeprom_generate(opt_eeprom_path, XBOX_EEPROM_VERSION_R1)) {
-            /* qcrypto_init: eeprom generation draws from the crypto RNG and
+            eeprom_ok = sz == (long)sizeof(XboxEEPROM);
+            if (!eeprom_ok) {
+                snprintf(msg, sizeof(msg),
+                         "xemu: EEPROM at %s is %ld bytes (expected %u), "
+                         "regenerating", opt_eeprom_path, sz,
+                         (unsigned)sizeof(XboxEEPROM));
+                show_user_message(msg);
+            }
+        }
+        if (!eeprom_ok) {
+            /* qcrypto_init: eeprom generation prefers the crypto RNG and
              * we run before qemu_init (gnutls/gcrypt inits are refcounted,
-             * so the later init call is unaffected). */
-            snprintf(msg, sizeof(msg), "xemu: generated new EEPROM at %s",
-                     opt_eeprom_path);
-            show_user_message(msg);
+             * so the later init call is unaffected). Generation itself no
+             * longer depends on it - see xbox_eeprom_random_bytes. */
+            qcrypto_init(NULL);
+            if (xbox_eeprom_generate(opt_eeprom_path,
+                                     XBOX_EEPROM_VERSION_R1)) {
+                snprintf(msg, sizeof(msg), "xemu: generated new EEPROM at %s",
+                         opt_eeprom_path);
+                show_user_message(msg);
+            } else {
+                snprintf(msg, sizeof(msg),
+                         "xemu: failed to write EEPROM at %s - check the "
+                         "folder exists and is writable", opt_eeprom_path);
+                show_user_message(msg);
+                return false;
+            }
         }
 
         /* Warn early about content that is not an xiso image (redump-style
