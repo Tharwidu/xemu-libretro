@@ -1084,22 +1084,11 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
         environ_cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, desc);
     }
 
-    /* Name the device type so the Controls menu shows "Xbox Controller" on
-     * each port rather than a bare "RetroPad". Labelling only - the RetroPad
-     * to Xbox mapping itself lives in xemu_input_update_controller(). */
-    {
-        static const struct retro_controller_description port_devices[] = {
-            { "Xbox Controller", RETRO_DEVICE_JOYPAD },
-        };
-        static const struct retro_controller_info ports[] = {
-            { port_devices, 1 },
-            { port_devices, 1 },
-            { port_devices, 1 },
-            { port_devices, 1 },
-            { NULL, 0 },
-        };
-        environ_cb(RETRO_ENVIRONMENT_SET_CONTROLLER_INFO, (void *)ports);
-    }
+    /* NOTE: deliberately no SET_CONTROLLER_INFO here. Declaring N controller
+     * ports makes the frontend call retro_set_controller_port_device() for
+     * each one, which the sibling xenia core turned into "four pads are
+     * connected" and crashed the guest during launch. The descriptors above
+     * are labels only and carry no connection semantics, so they stay. */
 }
 
 RETRO_API void retro_set_video_refresh(retro_video_refresh_t cb)   { video_cb = cb; }
