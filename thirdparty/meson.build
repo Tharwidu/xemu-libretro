@@ -15,10 +15,18 @@ if debug_vma
     ]
 endif
 
+# vk_mem_alloc.h is a vendored third-party header; newer compilers (GCC 16)
+# flag variables it only consumes inside VMA_DEBUG_LOG, which compiles to
+# nothing unless debug_vma is set. Warnings in vendored code must not fail our
+# build, but keep the suppression scoped to this target only.
+vma_warn_args = meson.get_compiler('cpp').get_supported_arguments(
+    '-Wno-unused-variable',
+    )
+
 vma_subproj = cmake.subproject('VulkanMemoryAllocator')
 libvma = static_library('vma',
                         sources: 'vma.cc',
-                        cpp_args: vma_defns,
+                        cpp_args: vma_defns + vma_warn_args,
                         include_directories: vma_subproj.include_directories('VulkanMemoryAllocator'),
                         dependencies: [vulkan, volk])
 vma = declare_dependency(include_directories: vma_subproj.include_directories('VulkanMemoryAllocator'),

@@ -17,6 +17,9 @@
 #include "system/cpus.h"
 #include "migration/snapshot.h"
 #include "hw/xbox/eeprom_generation.h"
+#include "hw/xbox/nv2a/pgraph/thirdparty/gloffscreen/gloffscreen_libretro.h"
+#include "hw/xbox/nv2a/pgraph/thirdparty/gloffscreen/gloffscreen.h"
+#include "ui/libretro-internal.h"
 #include "crypto/init.h"
 #include "ui/console.h"
 #include "hw/xbox/nv2a/nv2a.h"
@@ -133,8 +136,6 @@ static bool ra_vk_funcs_resolved = false;
 
 /* Standalone GL for VK renderer's internal GL interop (PFIFO thread) */
 typedef struct _GloContext GloContext;
-extern GloContext *glo_context_create(void);
-extern void glo_set_current(GloContext *context);
 
 /* ========================================================================= */
 /* Emulation state                                                           */
@@ -183,6 +184,22 @@ static int  opt_filtering = CONFIG_DISPLAY_FILTERING_LINEAR;
 static int  opt_audio_volume = 100;
 static int  opt_network_backend = 0; /* 0=disabled, 1=nat */
 static int  opt_frame_output = 0; /* 0=auto, 1=hardware, 2=software */
+
+/* Build "<system dir>/xemu/<name>" into dst. Returns false (and empties dst)
+ * if the result would not fit, so an over-long system directory fails loudly
+ * instead of silently yielding a truncated path that later opens the wrong
+ * file or none at all. Pass "" for the directory itself. */
+static bool build_system_path(char *dst, size_t dst_size, const char *name)
+{
+    int n = snprintf(dst, dst_size, "%s/xemu/%s", system_dir, name);
+    if (n < 0 || (size_t)n >= dst_size) {
+        LRLOG_ERROR("[xemu] System path too long: %s/xemu/%s\n",
+                    system_dir, name);
+        dst[0] = '\0';
+        return false;
+    }
+    return true;
+}
 
 /* Optional software frame output (delivers memory frames instead of the
  * hardware FBO; available via the xemu_frame_output core option). */
@@ -402,6 +419,10 @@ static void ra_vk_resolve_functions(void)
     }
 }
 
+#ifdef _WIN32
+/* Only ra_vk_import_display() needs this, and that is Win32-only for now
+ * because the import side expects an external-memory HANDLE. Drop the guard
+ * once the opaque-fd import lands and POSIX uses this path too. */
 static uint32_t ra_vk_find_memory_type(uint32_t type_bits, VkMemoryPropertyFlags props)
 {
     VkPhysicalDeviceMemoryProperties mem_props;
@@ -414,6 +435,7 @@ static uint32_t ra_vk_find_memory_type(uint32_t type_bits, VkMemoryPropertyFlags
     }
     return 0;
 }
+#endif
 
 static void ra_vk_transition_layout(VkImage image, VkImageLayout old_layout, VkImageLayout new_layout)
 {
@@ -628,16 +650,12 @@ static void context_reset(void)
      *      on the wrong context (access violation on real drivers).
      * Restore happens BEFORE waking the PFIFO thread so the display
      * context is guaranteed unbound before the worker binds it. */
-    extern void *glo_save_current(void);
-    extern void glo_restore_current(void *saved);
     void *prev_ctx = glo_save_current();
 
     if (!use_vulkan) {
         LRLOG_INFO("[xemu] OpenGL context ready, creating blit resources\n");
         create_blit_resources();
 
-        extern void libretro_gl_prepare(void);
-        extern void libretro_gl_wake_pfifo(void);
 
         libretro_gl_prepare();
         nv2a_context_init();
@@ -658,8 +676,6 @@ static void context_reset(void)
             }
         }
 
-        extern void libretro_gl_set_standalone_mode(void);
-        extern void libretro_gl_wake_pfifo(void);
 
         libretro_gl_set_standalone_mode();
         nv2a_context_init();
@@ -912,12 +928,10 @@ static void *emu_thread_func(void *opaque)
     qemu_init(argc, (char **)argv);
 
     /* Create XID USB gamepad devices for all 4 ports (BQL is held) */
-    extern void libretro_input_create_xid_devices(void);
     libretro_input_create_xid_devices();
 
     emu_initialized = true;
 
-    extern bool runstate_is_running(void);
 
     /* Run main loop */
     while (emu_thread_running) {
@@ -1160,7 +1174,6 @@ RETRO_API void retro_init(void)
 #endif
 
     /* Initialize the GL readiness wait event early */
-    extern void libretro_gl_init_wait_event(void);
     libretro_gl_init_wait_event();
 }
 
@@ -1226,17 +1239,17 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
     /* Set shader cache base path */
     if (system_dir[0]) {
         char base_path[4096];
-        snprintf(base_path, sizeof(base_path), "%s/xemu/", system_dir);
-        extern void libretro_settings_set_base_path(const char *path);
-        libretro_settings_set_base_path(base_path);
-        LRLOG_INFO("[xemu] Shader cache base path: %s\n", base_path);
+        if (build_system_path(base_path, sizeof(base_path), "")) {
+            libretro_settings_set_base_path(base_path);
+            LRLOG_INFO("[xemu] Shader cache base path: %s\n", base_path);
+        }
     }
 
     /* Auto-populate BIOS paths from system directory if not set by options */
     if (system_dir[0]) {
         if (!opt_bootrom_path[0]) {
-            snprintf(opt_bootrom_path, sizeof(opt_bootrom_path),
-                     "%s/xemu/mcpx_1.0.bin", system_dir);
+            build_system_path(opt_bootrom_path, sizeof(opt_bootrom_path),
+                              "mcpx_1.0.bin");
             LRLOG_INFO("[xemu] Auto-set bootrom: %s\n", opt_bootrom_path);
         }
         if (!opt_bios_path[0]) {
@@ -1250,8 +1263,9 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
             };
             for (size_t i = 0; i < ARRAY_SIZE(bios_names); i++) {
                 char cand[4096];
-                snprintf(cand, sizeof(cand), "%s/xemu/%s", system_dir,
-                         bios_names[i]);
+                if (!build_system_path(cand, sizeof(cand), bios_names[i])) {
+                    continue;
+                }
                 FILE *bf = fopen(cand, "rb");
                 if (bf || i == 0) {
                     snprintf(opt_bios_path, sizeof(opt_bios_path), "%s",
@@ -1265,13 +1279,13 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
             LRLOG_INFO("[xemu] Auto-set bios: %s\n", opt_bios_path);
         }
         if (!opt_hdd_path[0]) {
-            snprintf(opt_hdd_path, sizeof(opt_hdd_path),
-                     "%s/xemu/xbox_hdd.qcow2", system_dir);
+            build_system_path(opt_hdd_path, sizeof(opt_hdd_path),
+                              "xbox_hdd.qcow2");
             LRLOG_INFO("[xemu] Auto-set hdd: %s\n", opt_hdd_path);
         }
         if (!opt_eeprom_path[0]) {
-            snprintf(opt_eeprom_path, sizeof(opt_eeprom_path),
-                     "%s/xemu/xbox_eeprom.bin", system_dir);
+            build_system_path(opt_eeprom_path, sizeof(opt_eeprom_path),
+                              "xbox_eeprom.bin");
             LRLOG_INFO("[xemu] Auto-set eeprom: %s\n", opt_eeprom_path);
         }
     }
@@ -1295,7 +1309,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
         f = fopen(opt_bootrom_path, "rb");
         if (!f) {
             snprintf(msg, sizeof(msg),
-                     "xemu: MCPX boot ROM missing - expected %s",
+                     "xemu: MCPX boot ROM missing - expected %.400s",
                      opt_bootrom_path);
             show_user_message(msg);
             return false;
@@ -1313,7 +1327,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
         f = fopen(opt_bios_path, "rb");
         if (!f) {
             snprintf(msg, sizeof(msg),
-                     "xemu: Xbox BIOS missing - expected %s", opt_bios_path);
+                     "xemu: Xbox BIOS missing - expected %.400s", opt_bios_path);
             show_user_message(msg);
             return false;
         }
@@ -1330,7 +1344,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
         f = fopen(opt_hdd_path, "rb");
         if (!f) {
             snprintf(msg, sizeof(msg),
-                     "xemu: Xbox HDD image missing - expected %s",
+                     "xemu: Xbox HDD image missing - expected %.400s",
                      opt_hdd_path);
             show_user_message(msg);
             return false;
@@ -1353,7 +1367,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
             eeprom_ok = sz == (long)sizeof(XboxEEPROM);
             if (!eeprom_ok) {
                 snprintf(msg, sizeof(msg),
-                         "xemu: EEPROM at %s is %ld bytes (expected %u), "
+                         "xemu: EEPROM at %.400s is %ld bytes (expected %u), "
                          "regenerating", opt_eeprom_path, sz,
                          (unsigned)sizeof(XboxEEPROM));
                 show_user_message(msg);
@@ -1367,12 +1381,12 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
             qcrypto_init(NULL);
             if (xbox_eeprom_generate(opt_eeprom_path,
                                      XBOX_EEPROM_VERSION_R1)) {
-                snprintf(msg, sizeof(msg), "xemu: generated new EEPROM at %s",
+                snprintf(msg, sizeof(msg), "xemu: generated new EEPROM at %.400s",
                          opt_eeprom_path);
                 show_user_message(msg);
             } else {
                 snprintf(msg, sizeof(msg),
-                         "xemu: failed to write EEPROM at %s - check the "
+                         "xemu: failed to write EEPROM at %.400s - check the "
                          "folder exists and is writable", opt_eeprom_path);
                 show_user_message(msg);
                 return false;
@@ -1746,8 +1760,6 @@ RETRO_API void retro_run(void)
      * pixel format (its GL window lives in our process) and create the
      * emulator's isolated contexts with it. */
     if (frame_readback && !context_ready) {
-        extern void libretro_gl_set_isolated_mode(int pf, void *dc);
-        extern void libretro_gl_wake_pfifo(void);
         int pf = 0;
         HDC frontend_dc = NULL;
         HWND hwnd = NULL;
@@ -1774,8 +1786,6 @@ RETRO_API void retro_run(void)
          * this (frontend) thread; restore the frontend's own context
          * before returning and before waking the PFIFO thread — see the
          * matching comment in context_reset(). */
-        extern void *glo_save_current(void);
-        extern void glo_restore_current(void *saved);
         void *prev_ctx = glo_save_current();
         libretro_gl_set_isolated_mode(pf, frontend_dc);
         nv2a_context_init();
@@ -1987,8 +1997,6 @@ vk_audio:
 static void libretro_drain_audio(void)
 {
     if (audio_batch_cb) {
-        extern int libretro_audio_pull(int16_t *out_buf, int max_frames);
-        extern void libretro_audio_flush(void);
 
         /* One-time flush: discard stale boot audio on first active pull */
         static bool audio_flushed = false;
@@ -2002,7 +2010,6 @@ static void libretro_drain_audio(void)
          * 801-frame cap) underrun or force discards whenever the
          * frontend's retro_run cadence doesn't match 59.94 Hz exactly,
          * which is audible as crackle. */
-        extern int libretro_audio_ring_frames(void);
         int avail = libretro_audio_ring_frames();
 
         /* Skip ahead only on a genuine stall (>100ms backlog), e.g. after

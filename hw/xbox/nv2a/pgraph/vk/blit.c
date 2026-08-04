@@ -181,10 +181,10 @@ void pgraph_vk_image_blit(NV2AState *d)
     if (leftover_bytes > 0) {
         uint8_t *src =
             source_row + adjusted_height * context_surfaces->source_pitch;
-        uint8_t *dest =
+        uint8_t *leftover_dest =
             dest_row + adjusted_height * context_surfaces->dest_pitch;
 
-        perform_blit(image_blit->operation, src, dest,
+        perform_blit(image_blit->operation, src, leftover_dest,
                      leftover_bytes / bytes_per_pixel, 1, leftover_bytes,
                      context_surfaces->source_pitch,
                      context_surfaces->dest_pitch, beta);
@@ -213,9 +213,10 @@ void pgraph_vk_image_blit(NV2AState *d)
         }
 
         if (leftover_bytes > 0) {
-            uint8_t *dest =
+            uint8_t *leftover_dest =
                 dest_row + adjusted_height * context_surfaces->dest_pitch;
-            patch_alpha(dest, leftover_bytes / 4, 1, 0, alpha_override);
+            patch_alpha(leftover_dest, leftover_bytes / 4, 1, 0,
+                        alpha_override);
         }
     }
 

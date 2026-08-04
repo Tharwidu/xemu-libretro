@@ -7,6 +7,9 @@
  */
 
 #include "qemu/osdep.h"
+#include "ui/xemu-notifications.h"
+#include "ui/xemu-snapshots.h"
+#include "ui/libretro-internal.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdbool.h>
@@ -28,24 +31,18 @@ typedef struct QEMUFile QEMUFile;
 /* xemu error/notification stubs                                             */
 /* ========================================================================= */
 
-void xemu_queue_error_message(const char *fmt, ...)
+/* Signatures must match ui/xemu-notifications.h: callers pass an already
+ * formatted string, so print it literally. Treating it as a format string
+ * (the previous varargs stub) misreads any message containing a '%' - which
+ * QEMU error text routinely can. */
+void xemu_queue_error_message(const char *msg)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    fprintf(stderr, "[xemu-libretro] ERROR: ");
-    vfprintf(stderr, fmt, ap);
-    fprintf(stderr, "\n");
-    va_end(ap);
+    fprintf(stderr, "[xemu-libretro] ERROR: %s\n", msg);
 }
 
-void xemu_queue_notification(const char *fmt, ...)
+void xemu_queue_notification(const char *msg)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    fprintf(stderr, "[xemu-libretro] NOTIFY: ");
-    vfprintf(stderr, fmt, ap);
-    fprintf(stderr, "\n");
-    va_end(ap);
+    fprintf(stderr, "[xemu-libretro] NOTIFY: %s\n", msg);
 }
 
 /* ========================================================================= */
