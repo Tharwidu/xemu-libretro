@@ -248,6 +248,61 @@ static unsigned last_frame_height = XBOX_NATIVE_HEIGHT;
 #define READBACK_MAX_H 1080
 static uint32_t readback_frame[READBACK_MAX_W * READBACK_MAX_H];
 
+/* ------------------------------------------------------------------ *
+ * Periodic runtime stats.
+ *
+ * Always on, roughly every ten seconds. The point is that a user's log is
+ * useful without them having to reproduce anything under a debug flag -
+ * every performance question this core has produced so far ("it felt
+ * slow", "it stuttered") has been unattributable because the log said
+ * nothing about what the core was doing.
+ * ------------------------------------------------------------------ */
+#define STATS_INTERVAL_FRAMES 600
+
+static struct {
+    int64_t window_start_us;   /* when this window opened */
+    unsigned frames;           /* retro_run calls */
+    unsigned delivered;        /* frames handed to video_cb with pixels */
+    unsigned duped;            /* frames skipped via can-dupe */
+    unsigned black;            /* no display frame available */
+    unsigned src_pgraph, src_vga, src_vk;
+    uint64_t capture_us;       /* time inside the frame fetch */
+    uint64_t pace_sleep_us;    /* time spent in the pacer */
+    unsigned ff_frames;        /* frames while fast-forwarding */
+    unsigned audio_frames;     /* audio frames pushed to the frontend */
+} stats;
+
+static void stats_report(void)
+{
+    int64_t now = g_get_monotonic_time();
+    if (stats.window_start_us == 0) {
+        stats.window_start_us = now;
+        return;
+    }
+
+    double secs = (double)(now - stats.window_start_us) / 1e6;
+    if (secs <= 0.0) {
+        secs = 1.0;
+    }
+
+    LRLOG_INFO("[xemu] stats: %.1f fps (%u frames/%.1fs) | delivered %u "
+               "dup %u black %u | src pgraph %u vga %u vk %u | capture "
+               "%.2f ms/f | pace %.2f ms/f | ff %u | audio %u frames "
+               "(%.0f/s)\n",
+               stats.frames / secs, stats.frames, secs,
+               stats.delivered, stats.duped, stats.black,
+               stats.src_pgraph, stats.src_vga, stats.src_vk,
+               stats.frames ? (double)stats.capture_us / stats.frames / 1000.0
+                            : 0.0,
+               stats.frames ? (double)stats.pace_sleep_us / stats.frames / 1000.0
+                            : 0.0,
+               stats.ff_frames, stats.audio_frames,
+               stats.audio_frames / secs);
+
+    memset(&stats, 0, sizeof(stats));
+    stats.window_start_us = now;
+}
+
 /* Tell the frontend the guest's display geometry whenever it changes.
  *
  * The Xbox scales its output in hardware, so the framebuffer's pixel
@@ -2122,6 +2177,11 @@ RETRO_API void retro_run(void)
 {
     static int run_count = 0;
     run_count++;
+
+    stats.frames++;
+    if ((run_count % STATS_INTERVAL_FRAMES) == 0) {
+        stats_report();
+    }
     qatomic_set(&last_retro_run_us, g_get_monotonic_time());
     if (xemu_debug_logs() && (run_count <= 5 || (run_count % 300) == 0)) {
         LRLOG_INFO("[xemu] retro_run #%d (emu_init=%d ctx_ready=%d game=%d)\n",
@@ -2163,8 +2223,13 @@ RETRO_API void retro_run(void)
     const bool skip_video =
         frontend_can_dupe && !(av_enable & RETRO_AV_ENABLE_VIDEO);
 
+    if (fast_forwarding) {
+        stats.ff_frames++;
+    }
+
     if (!fast_forwarding)
     {
+        int64_t pace_enter_us = g_get_monotonic_time();
         static int64_t next_frame_us;
         /* Pace to the console's own refresh - 50 Hz on a PAL console -
          * or we would self-pace at 60 while advertising 50. */
@@ -2179,6 +2244,8 @@ RETRO_API void retro_run(void)
             now_us = g_get_monotonic_time();
         }
         next_frame_us += frame_us;
+        stats.pace_sleep_us +=
+            (uint64_t)(g_get_monotonic_time() - pace_enter_us);
     }
 
     /* Schedule vblank (graphic_hw_update + VGA scanout mirror) on the
@@ -2316,10 +2383,12 @@ RETRO_API void retro_run(void)
          * The hardware paths do not do this: their blit is GPU-side and
          * cheap, so skipping it would add risk for no real saving. */
         if (skip_video) {
+            stats.duped++;
             video_cb(NULL, last_frame_width, last_frame_height, 0);
             goto readback_done;
         }
 
+        const int64_t capture_start_us = g_get_monotonic_time();
         if (use_vulkan) {
             /* The Vulkan capture runs on the emulation thread off the back
              * of render_display, so there is no surface handle to check
@@ -2352,6 +2421,21 @@ RETRO_API void retro_run(void)
                        run_count, got, w, h,
                        used_vga ? "vga" : "pgraph", pg_tex);
         }
+        stats.capture_us +=
+            (uint64_t)(g_get_monotonic_time() - capture_start_us);
+        if (got) {
+            stats.delivered++;
+            if (use_vulkan) {
+                stats.src_vk++;
+            } else if (used_vga) {
+                stats.src_vga++;
+            } else {
+                stats.src_pgraph++;
+            }
+        } else {
+            stats.black++;
+        }
+
         if (got) {
             update_display_geometry((unsigned)w, (unsigned)h);
             last_frame_width  = (unsigned)w;
@@ -2551,6 +2635,7 @@ static void libretro_drain_audio(void)
                 break;
             }
             audio_batch_cb(audio_buf, frames);
+            stats.audio_frames += (unsigned)frames;
             avail -= frames;
         }
     }
