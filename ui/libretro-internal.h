@@ -20,6 +20,8 @@
 #ifndef UI_LIBRETRO_INTERNAL_H
 #define UI_LIBRETRO_INTERNAL_H
 
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /*
@@ -45,5 +47,24 @@ int libretro_audio_ring_frames(void);
 /* hw/xbox/mcpx/apu/monitor.c: drop everything queued in the APU ring. Used
  * once at first active pull to discard stale boot audio. */
 void libretro_audio_flush(void);
+
+/* ui/libretro-eeprom.c: guest-persistent console settings.
+ *
+ * The EEPROM is the guest's own state, written by the Xbox Dashboard on real
+ * hardware, so every field here is opt-in: leave it at the "unset" value and
+ * the field is not touched. Silently rewriting on every launch would clobber
+ * what the user chose in the Dashboard. */
+typedef struct LibretroEepromSettings {
+    int language;        /* Xbox LanguageID (1 = English); <0 leaves it */
+    uint32_t video_standard; /* XC_VIDEO_STANDARD_*; 0 leaves it */
+    int widescreen;      /* 1 on, 0 off, <0 leaves it */
+} LibretroEepromSettings;
+
+/* Apply the requested overrides to the EEPROM at `path`, recomputing whichever
+ * checksums the change invalidates. Returns false and fills `err` on failure;
+ * a no-op request succeeds without opening the file. */
+bool libretro_eeprom_apply(const char *path,
+                           const LibretroEepromSettings *settings,
+                           char *err, size_t err_size);
 
 #endif /* UI_LIBRETRO_INTERNAL_H */

@@ -185,6 +185,10 @@ static int  opt_filtering = CONFIG_DISPLAY_FILTERING_LINEAR;
 static int  opt_audio_volume = 100;
 static int  opt_network_backend = 0; /* 0=disabled, 1=nat */
 static int  opt_frame_output = 0; /* 0=auto, 1=hardware, 2=software */
+/* EEPROM (guest-persistent) settings; "leave unchanged" by default. */
+static int      opt_eeprom_language = -1;
+static uint32_t opt_eeprom_video_standard = 0;
+static int      opt_eeprom_widescreen = -1;
 
 
 /* Build "<system dir>/xemu/<name>" into dst. Returns false (and empties dst)
@@ -841,6 +845,67 @@ static void update_variables(void)
         if (opt_surface_scale > 10) opt_surface_scale = 10;
     }
 
+    var.key = "xemu_console_language";
+    var.value = NULL;
+    opt_eeprom_language = -1;
+    if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+        /* Xbox LanguageID values. "auto" leaves the EEPROM alone. */
+        static const struct { const char *name; int id; } langs[] = {
+            { "english", 1 }, { "japanese", 2 }, { "german", 3 },
+            { "french", 4 },  { "spanish", 5 },  { "italian", 6 },
+            { "korean", 7 },  { "chinese", 8 },  { "portuguese", 9 },
+        };
+        if (!strcmp(var.value, "frontend")) {
+            unsigned fe_lang = RETRO_LANGUAGE_ENGLISH;
+            if (environ_cb(RETRO_ENVIRONMENT_GET_LANGUAGE, &fe_lang)) {
+                switch (fe_lang) {
+                case RETRO_LANGUAGE_JAPANESE:   opt_eeprom_language = 2; break;
+                case RETRO_LANGUAGE_GERMAN:     opt_eeprom_language = 3; break;
+                case RETRO_LANGUAGE_FRENCH:     opt_eeprom_language = 4; break;
+                case RETRO_LANGUAGE_SPANISH:    opt_eeprom_language = 5; break;
+                case RETRO_LANGUAGE_ITALIAN:    opt_eeprom_language = 6; break;
+                case RETRO_LANGUAGE_KOREAN:     opt_eeprom_language = 7; break;
+                case RETRO_LANGUAGE_CHINESE_TRADITIONAL:
+                case RETRO_LANGUAGE_CHINESE_SIMPLIFIED:
+                                                opt_eeprom_language = 8; break;
+                case RETRO_LANGUAGE_PORTUGUESE_BRAZIL:
+                case RETRO_LANGUAGE_PORTUGUESE_PORTUGAL:
+                                                opt_eeprom_language = 9; break;
+                default:                        opt_eeprom_language = 1; break;
+                }
+            } else {
+                /* Frontend has no language API (RA 1.7.5): leave it alone
+                 * rather than forcing English over the user's setting. */
+                LRLOG_INFO("[xemu] Frontend language unavailable; "
+                           "leaving console language unchanged\n");
+            }
+        } else {
+            for (size_t i = 0; i < ARRAY_SIZE(langs); i++) {
+                if (!strcmp(var.value, langs[i].name)) {
+                    opt_eeprom_language = langs[i].id;
+                    break;
+                }
+            }
+        }
+    }
+
+    var.key = "xemu_console_video_standard";
+    var.value = NULL;
+    opt_eeprom_video_standard = 0;
+    if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+        if (!strcmp(var.value, "ntsc-m"))      opt_eeprom_video_standard = 0x00400100;
+        else if (!strcmp(var.value, "ntsc-j")) opt_eeprom_video_standard = 0x00400200;
+        else if (!strcmp(var.value, "pal-i"))  opt_eeprom_video_standard = 0x00800300;
+    }
+
+    var.key = "xemu_console_widescreen";
+    var.value = NULL;
+    opt_eeprom_widescreen = -1;
+    if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+        if (!strcmp(var.value, "on"))       opt_eeprom_widescreen = 1;
+        else if (!strcmp(var.value, "off")) opt_eeprom_widescreen = 0;
+    }
+
     var.key = "xemu_use_dsp";
     var.value = NULL;
     if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
@@ -1445,6 +1510,35 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
                          "folder exists and is writable", opt_eeprom_path);
                 show_user_message(msg);
                 return false;
+            }
+        }
+
+        /* Apply guest-persistent settings to the EEPROM before the machine
+         * starts. Everything left on "auto" is untouched, so a value the
+         * user set in the Xbox Dashboard survives. */
+        {
+            LibretroEepromSettings ee = {
+                .language        = opt_eeprom_language,
+                .video_standard  = opt_eeprom_video_standard,
+                .widescreen      = opt_eeprom_widescreen,
+            };
+            char ee_err[128] = "";
+            if (!libretro_eeprom_apply(opt_eeprom_path, &ee,
+                                       ee_err, sizeof(ee_err))) {
+                /* Non-fatal: the console still boots with its existing
+                 * settings, which is better than refusing to start. */
+                snprintf(msg, sizeof(msg),
+                         "xemu: could not apply console settings - %.100s",
+                         ee_err);
+                show_user_message(msg);
+            } else if (opt_eeprom_language > 0 ||
+                       opt_eeprom_video_standard != 0 ||
+                       opt_eeprom_widescreen >= 0) {
+                LRLOG_INFO("[xemu] EEPROM settings applied: language=%d "
+                           "video_standard=0x%08x widescreen=%d "
+                           "(-1/0 = left unchanged)\n",
+                           opt_eeprom_language, opt_eeprom_video_standard,
+                           opt_eeprom_widescreen);
             }
         }
 

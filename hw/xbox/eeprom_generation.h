@@ -56,5 +56,9 @@ typedef enum {
 
 bool xbox_eeprom_generate(const char *file, XboxEEPROMVersion ver);
 
+/* Additive checksum used by both the identity and user sections. Exposed
+ * so the libretro core can rewrite user settings in place. */
+uint32_t xbox_eeprom_crc(uint8_t *data, size_t len);
+
 #endif
 

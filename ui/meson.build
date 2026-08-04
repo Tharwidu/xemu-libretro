@@ -24,6 +24,7 @@ if get_option('libretro')
   xemu_ss = ss.source_set()
   xemu_ss.add(files(
     'libretro.c',
+    'libretro-eeprom.c',
     'libretro-settings-stub.c',
     'libretro-stubs.c',
     'xemu-net.c',

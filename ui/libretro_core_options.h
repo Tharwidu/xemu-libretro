@@ -138,6 +138,60 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         "hdtv"
     },
     {
+        "xemu_console_language",
+        "Console Language (EEPROM)",
+        NULL,
+        "Language the emulated console reports to games, stored in the console's EEPROM. 'Auto' leaves whatever is already there, including a value you set in the Xbox Dashboard. 'Follow Frontend' uses RetroArch's language setting. Requires restart.",
+        NULL,
+        "system",
+        {
+            { "auto",       "Auto (leave unchanged)" },
+            { "frontend",   "Follow Frontend" },
+            { "english",    "English" },
+            { "japanese",   "Japanese" },
+            { "german",     "German" },
+            { "french",     "French" },
+            { "spanish",    "Spanish" },
+            { "italian",    "Italian" },
+            { "korean",     "Korean" },
+            { "chinese",    "Chinese (Traditional)" },
+            { "portuguese", "Portuguese" },
+            { NULL, NULL },
+        },
+        "auto"
+    },
+    {
+        "xemu_console_video_standard",
+        "Console Video Standard (EEPROM)",
+        NULL,
+        "TV standard the emulated console is wired for, stored in the console's EEPROM. PAL-I runs PAL titles at their native 50 Hz. 'Auto' leaves whatever is already there. Requires restart.",
+        NULL,
+        "system",
+        {
+            { "auto",   "Auto (leave unchanged)" },
+            { "ntsc-m", "NTSC-M (North America)" },
+            { "ntsc-j", "NTSC-J (Japan)" },
+            { "pal-i",  "PAL-I (Europe)" },
+            { NULL, NULL },
+        },
+        "auto"
+    },
+    {
+        "xemu_console_widescreen",
+        "Console Widescreen (EEPROM)",
+        NULL,
+        "Whether the emulated console thinks it is connected to a widescreen TV, stored in the console's EEPROM. Games read this to choose a 16:9 or 4:3 presentation, and the core reports the matching aspect ratio to the frontend. 'Auto' leaves whatever is already there. Requires restart.",
+        NULL,
+        "video",
+        {
+            { "auto", "Auto (leave unchanged)" },
+            { "on",   "16:9 Widescreen" },
+            { "off",  "4:3 Standard" },
+            { NULL, NULL },
+        },
+        "auto"
+    },
+    {
         "xemu_use_dsp",
         "APU DSP Emulation",
         NULL,
