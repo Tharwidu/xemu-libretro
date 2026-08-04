@@ -1755,11 +1755,17 @@ RETRO_API void retro_run(void)
         input_poll_cb();
     }
 
-#ifdef _WIN32
-    /* Software mode: one-time GL setup. Discover the frontend's window
-     * pixel format (its GL window lives in our process) and create the
-     * emulator's isolated contexts with it. */
+    /* Software mode: one-time GL setup. No hardware context is negotiated
+     * in this mode, so context_reset() never runs and this is the only
+     * place the emulator's GL contexts get created. The PFIFO thread is
+     * already blocked in libretro_gl_wait_for_contexts(); if we never get
+     * here it times out and runs pgraph_gl_init() with nothing current,
+     * which aborts the frontend inside epoxy. */
     if (frame_readback && !context_ready) {
+#ifdef _WIN32
+        /* Discover the frontend's window pixel format (its GL window lives
+         * in our process) and create isolated contexts with it - rendering
+         * is wrong on contexts built from ChoosePixelFormat defaults. */
         int pf = 0;
         HDC frontend_dc = NULL;
         HWND hwnd = NULL;
@@ -1782,18 +1788,28 @@ RETRO_API void retro_run(void)
         }
         LRLOG_INFO("[xemu] Frontend window pixel format: %d%s\n", pf,
                    pf > 0 ? "" : " (not found; using defaults)");
+#endif
         /* nv2a_context_init() leaves the nv2a display context current on
          * this (frontend) thread; restore the frontend's own context
          * before returning and before waking the PFIFO thread — see the
          * matching comment in context_reset(). */
         void *prev_ctx = glo_save_current();
+#ifdef _WIN32
         libretro_gl_set_isolated_mode(pf, frontend_dc);
+#else
+        /* POSIX has no pixel-format equivalent to inherit, so use the
+         * self-contained path: contexts off EGL_DEFAULT_DISPLAY (or GLX),
+         * shared only with each other. Same shape the Vulkan branch of
+         * context_reset() uses. */
+        LRLOG_INFO("[xemu] Software mode: creating standalone GL contexts\n");
+        libretro_gl_set_standalone_mode();
+#endif
         nv2a_context_init();
         glo_restore_current(prev_ctx);
         libretro_gl_wake_pfifo();
         context_ready = true;
+        LRLOG_INFO("[xemu] Software mode: GL contexts ready\n");
     }
-#endif
 
     if (!emu_initialized || !context_ready) {
         /* Emulator not ready yet, draw black frame */
