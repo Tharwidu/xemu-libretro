@@ -225,8 +225,16 @@ static bool build_system_path(char *dst, size_t dst_size, const char *name)
 /* Optional software frame output (delivers memory frames instead of the
  * hardware FBO; available via the xemu_frame_output core option). */
 static bool frame_readback = false;
+/* Frontend capabilities, probed once in retro_set_environment. */
+/* The Xbox's native output mode. */
 #define XBOX_NATIVE_WIDTH  640
 #define XBOX_NATIVE_HEIGHT 480
+
+static bool frontend_can_dupe = false;
+/* Size of the last frame actually delivered, so duplicate frames can be
+ * announced at the dimensions the frontend already has. */
+static unsigned last_frame_width  = XBOX_NATIVE_WIDTH;
+static unsigned last_frame_height = XBOX_NATIVE_HEIGHT;
 #define READBACK_MAX_W 1920
 #define READBACK_MAX_H 1080
 static uint32_t readback_frame[READBACK_MAX_W * READBACK_MAX_H];
@@ -1190,6 +1198,16 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     bool no_game = false;
     environ_cb(RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME, &no_game);
 
+    /* Whether the frontend accepts a NULL frame meaning "repeat the last
+     * one". Without it we must always deliver pixels, even on frames the
+     * frontend has told us it will discard. */
+    frontend_can_dupe = false;
+    if (!environ_cb(RETRO_ENVIRONMENT_GET_CAN_DUPE, &frontend_can_dupe)) {
+        frontend_can_dupe = false;
+    }
+    LRLOG_INFO("[xemu] Frontend frame duping: %s\n",
+               frontend_can_dupe ? "yes" : "no");
+
     /* Get VFS interface */
     struct retro_vfs_interface_info vfs_info = { 3, NULL };
     if (environ_cb(RETRO_ENVIRONMENT_GET_VFS_INTERFACE, &vfs_info)) {
@@ -1915,6 +1933,33 @@ RETRO_API void retro_run(void)
      * seen as stutter in heavier titles. When the frontend already
      * throttles at or below content rate the deadline is always in the
      * past and this block is a no-op. */
+    /* Frontend state for this frame. Both calls are optional: an older
+     * frontend simply leaves the defaults, which is the previous
+     * behaviour. */
+    bool fast_forwarding = false;
+    if (environ_cb) {
+        environ_cb(RETRO_ENVIRONMENT_GET_FASTFORWARDING, &fast_forwarding);
+    }
+    {
+        static int last_ff = -1;
+        if ((int)fast_forwarding != last_ff) {
+            LRLOG_INFO("[xemu] Fast-forward %s\n",
+                       fast_forwarding ? "engaged (pacer bypassed)"
+                                       : "released (pacing to content rate)");
+            last_ff = (int)fast_forwarding;
+        }
+    }
+
+    int av_enable = RETRO_AV_ENABLE_VIDEO | RETRO_AV_ENABLE_AUDIO;
+    if (environ_cb) {
+        environ_cb(RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE, &av_enable);
+    }
+    /* Only skip video work if the frontend can repeat the previous frame;
+     * otherwise it still needs pixels from us. */
+    const bool skip_video =
+        frontend_can_dupe && !(av_enable & RETRO_AV_ENABLE_VIDEO);
+
+    if (!fast_forwarding)
     {
         static int64_t next_frame_us;
         /* Pace to the console's own refresh - 50 Hz on a PAL console -
@@ -2059,6 +2104,18 @@ RETRO_API void retro_run(void)
         bool got = false;
         bool used_vga = false;
 
+        /* The frontend has told us it will discard this frame (fast-forward,
+         * rewind, run-ahead). The surface cycle above still runs - it ages
+         * the surface cache and picking it up late causes stale-surface
+         * artifacts - but the GPU->CPU readback, which is the expensive part
+         * of this path, is skipped and the frontend repeats its last frame.
+         * The hardware paths do not do this: their blit is GPU-side and
+         * cheap, so skipping it would add risk for no real saving. */
+        if (skip_video) {
+            video_cb(NULL, last_frame_width, last_frame_height, 0);
+            goto readback_done;
+        }
+
         if (pg_tex) {
             got = nv2a_gl_get_display_frame(readback_frame,
                                             READBACK_MAX_W * READBACK_MAX_H,
@@ -2086,12 +2143,18 @@ RETRO_API void retro_run(void)
         }
         if (got) {
             update_display_geometry((unsigned)w, (unsigned)h);
+            last_frame_width  = (unsigned)w;
+            last_frame_height = (unsigned)h;
             video_cb(readback_frame, w, h, w * sizeof(uint32_t));
         } else {
             /* No display frame yet: show black */
-            memset(readback_frame, 0, 640 * 480 * sizeof(uint32_t));
-            video_cb(readback_frame, 640, 480, 640 * sizeof(uint32_t));
+            memset(readback_frame, 0,
+                   XBOX_NATIVE_WIDTH * XBOX_NATIVE_HEIGHT * sizeof(uint32_t));
+            video_cb(readback_frame, XBOX_NATIVE_WIDTH, XBOX_NATIVE_HEIGHT,
+                     XBOX_NATIVE_WIDTH * sizeof(uint32_t));
         }
+readback_done:
+        ;
     }
     /* ---- OpenGL HW path ---- */
     else if (!use_vulkan) {
