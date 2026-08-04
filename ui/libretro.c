@@ -276,6 +276,10 @@ static void stats_report(void)
 {
     int64_t now = g_get_monotonic_time();
     if (stats.window_start_us == 0) {
+        /* First call opens the window. Clear the counters too: they have
+         * been accumulating since load, and reporting them against a
+         * window that starts here would double the rates. */
+        memset(&stats, 0, sizeof(stats));
         stats.window_start_us = now;
         return;
     }
