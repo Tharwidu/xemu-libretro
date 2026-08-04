@@ -7,6 +7,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "ui/libretro-internal.h"
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>

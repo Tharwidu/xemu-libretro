@@ -23,6 +23,9 @@
 #include "hw/xbox/nv2a/pgraph/pgraph.h"
 #include "debug.h"
 #include "renderer.h"
+#ifdef LIBRETRO
+#include "hw/xbox/nv2a/pgraph/thirdparty/gloffscreen/gloffscreen_libretro.h"
+#endif
 
 GloContext *g_nv2a_context_render;
 GloContext *g_nv2a_context_display;
@@ -68,7 +71,6 @@ static void pgraph_gl_init(NV2AState *d, Error **errp)
 
     /* fire up opengl */
 #ifdef LIBRETRO
-    extern void libretro_gl_wait_for_contexts(void);
     libretro_gl_wait_for_contexts();
 #endif
     glo_set_current(g_nv2a_context_render);

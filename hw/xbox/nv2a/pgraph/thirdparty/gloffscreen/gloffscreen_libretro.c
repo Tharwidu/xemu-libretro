@@ -18,6 +18,7 @@
 #include <stdbool.h>
 
 #include "gloffscreen.h"
+#include "gloffscreen_libretro.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -47,7 +48,6 @@ typedef HGLRC (WINAPI *PFNWGLCREATECONTEXTATTRIBSARBPROC)(HDC, HGLRC, const int 
 
 /* Routes gloffscreen diagnostics into the frontend's log (stderr never
  * reaches RetroArch's --log-file). Defined in ui/libretro.c. */
-extern void libretro_glo_log(const char *fmt, ...);
 
 /* Stored reference to RetroArch's GL context for sharing */
 static HGLRC g_retroarch_hglrc = NULL;

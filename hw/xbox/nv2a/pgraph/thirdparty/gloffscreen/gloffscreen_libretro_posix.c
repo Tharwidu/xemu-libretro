@@ -28,6 +28,7 @@
 #include <time.h>
 
 #include "gloffscreen.h"
+#include "gloffscreen_libretro.h"
 
 #include <epoxy/egl.h>
 
