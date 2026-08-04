@@ -27,3 +27,6 @@ build.log
 /macos-libs/
 /macos-pkgs/
 /xemu.iconset/
+
+# Local build transcripts
+winbuild*.log
