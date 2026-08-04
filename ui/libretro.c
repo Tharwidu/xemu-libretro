@@ -20,6 +20,7 @@
 #include "hw/xbox/nv2a/pgraph/thirdparty/gloffscreen/gloffscreen_libretro.h"
 #include "hw/xbox/nv2a/pgraph/thirdparty/gloffscreen/gloffscreen.h"
 #include "ui/libretro-internal.h"
+#include "ui/xemu-widescreen.h"
 #include "crypto/init.h"
 #include "ui/console.h"
 #include "hw/xbox/nv2a/nv2a.h"
@@ -185,6 +186,7 @@ static int  opt_audio_volume = 100;
 static int  opt_network_backend = 0; /* 0=disabled, 1=nat */
 static int  opt_frame_output = 0; /* 0=auto, 1=hardware, 2=software */
 
+
 /* Build "<system dir>/xemu/<name>" into dst. Returns false (and empties dst)
  * if the result would not fit, so an over-long system directory fails loudly
  * instead of silently yielding a truncated path that later opens the wrong
@@ -207,6 +209,59 @@ static bool frame_readback = false;
 #define READBACK_MAX_W 1920
 #define READBACK_MAX_H 1080
 static uint32_t readback_frame[READBACK_MAX_W * READBACK_MAX_H];
+
+/* Tell the frontend the guest's display geometry whenever it changes.
+ *
+ * The Xbox scales its output in hardware, so the framebuffer's pixel
+ * dimensions are NOT its display aspect: a 16:9 title still renders a
+ * 640x480 surface. Deriving the ratio from width/height would report
+ * 1.333 for every title. The guest instead announces the TV it thinks it
+ * is driving by writing the aspect-ratio PM GPIO (hw/xbox/acpi_xbox.c),
+ * which xemu tracks in xemu_get_widescreen() - the same source upstream's
+ * own "auto" aspect setting uses. It can change at runtime, when the user
+ * changes the console's video setting in the dashboard.
+ *
+ * SET_GEOMETRY is the cheap call: geometry only, no AV re-init, so it is
+ * safe to attempt every frame and skip when nothing moved. */
+static void update_display_geometry(unsigned width, unsigned height)
+{
+    static unsigned last_width;
+    static unsigned last_height;
+    static float last_aspect;
+
+    if (!environ_cb || width == 0 || height == 0) {
+        return;
+    }
+
+    float aspect = xemu_get_widescreen() ? (16.0f / 9.0f) : (4.0f / 3.0f);
+
+    if (width == last_width && height == last_height &&
+        aspect == last_aspect) {
+        return;
+    }
+
+    struct retro_game_geometry geom;
+    memset(&geom, 0, sizeof(geom));
+    geom.base_width   = width;
+    geom.base_height  = height;
+    geom.max_width    = READBACK_MAX_W;
+    geom.max_height   = READBACK_MAX_H;
+    geom.aspect_ratio = aspect;
+
+    if (!environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geom)) {
+        /* Frontend predates the call (RA < 1.3). Remember anyway so we do
+         * not retry on every frame for the rest of the session. */
+        LRLOG_INFO("[xemu] SET_GEOMETRY unsupported by this frontend\n");
+    } else {
+        LRLOG_INFO("[xemu] Geometry: %ux%u, aspect %.4f (%s)\n",
+                   width, height, (double)aspect,
+                   xemu_get_widescreen() ? "16:9" : "4:3");
+    }
+
+    last_width  = width;
+    last_height = height;
+    last_aspect = aspect;
+}
 
 /* ========================================================================= */
 /* Forward declarations                                                      */
@@ -1887,6 +1942,7 @@ RETRO_API void retro_run(void)
                        used_vga ? "vga" : "pgraph", pg_tex);
         }
         if (got) {
+            update_display_geometry((unsigned)w, (unsigned)h);
             video_cb(readback_frame, w, h, w * sizeof(uint32_t));
         } else {
             /* No display frame yet: show black */
@@ -1939,6 +1995,7 @@ RETRO_API void retro_run(void)
         }
 
         nv2a_release_framebuffer_surface();
+        update_display_geometry(width, height);
         video_cb(RETRO_HW_FRAME_BUFFER_VALID, width, height, 0);
     }
     /* ---- Vulkan path ---- */
@@ -1993,6 +2050,7 @@ RETRO_API void retro_run(void)
                 width = disp_w;
                 height = disp_h;
 
+                update_display_geometry(width, height);
                 video_cb(RETRO_HW_FRAME_BUFFER_VALID, width, height, 0);
             } else {
                 video_cb(NULL, width, height, 0);
