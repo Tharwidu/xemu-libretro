@@ -46,7 +46,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         "xemu_memory",
         "System Memory (MB)",
         NULL,
-        "Amount of system RAM. 64 MB is standard; 128 MB is used by debug kits.",
+        "Amount of system RAM. 64 MB is standard; 128 MB is used by debug kits. Requires restart.",
         NULL,
         "system",
         {
@@ -60,7 +60,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         "xemu_network_backend",
         "Network Backend",
         NULL,
-        "Enable network support for Xbox games with LAN/System Link features. NAT backend provides basic connectivity.",
+        "Enable network support for Xbox games with LAN/System Link features. NAT backend provides basic connectivity. Requires restart.",
         NULL,
         "system",
         {
@@ -74,7 +74,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         "xemu_skip_boot_anim",
         "Skip Boot Animation",
         NULL,
-        "Skip the Xbox boot animation.",
+        "Skip the Xbox boot animation. Requires restart.",
         NULL,
         "system",
         {
@@ -88,7 +88,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         "xemu_hard_fpu",
         "Hardware FPU Emulation",
         NULL,
-        "Use host FPU for x87 emulation. Faster but may have minor inaccuracies.",
+        "Use host FPU for x87 emulation. Faster but may have minor inaccuracies. Requires restart.",
         NULL,
         "system",
         {
@@ -124,7 +124,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         "xemu_avpack",
         "AV Pack",
         NULL,
-        "Select the AV pack type. Affects available video modes.",
+        "Select the AV pack type. Affects available video modes. Requires restart.",
         NULL,
         "video",
         {
@@ -256,7 +256,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         "xemu_frame_output",
         "Frame Output Mode",
         NULL,
-        "How frames reach the frontend. 'Auto' uses software readback (memory frames) for maximum compatibility across RetroArch builds, GL drivers and OSes, and is what EmuVR's capture needs. 'Hardware (FBO)' is a faster direct-blit path, but only safe on a modern RetroArch/GL stack that keeps its shared GL context alive (older builds such as 1.7.5 can crash the render thread). Readback costs a little performance.",
+        "How frames reach the frontend. 'Auto' uses software readback (memory frames) for maximum compatibility across RetroArch builds, GL drivers and OSes, and is what EmuVR's capture needs. 'Hardware (FBO)' is a faster direct-blit path, but only safe on a modern RetroArch/GL stack that keeps its shared GL context alive (older builds such as 1.7.5 can crash the render thread). Readback costs a little performance. Requires restart.",
         NULL,
         "video",
         {

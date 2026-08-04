@@ -1577,6 +1577,11 @@ static void probe_frontend_caps(void)
         return;
     }
 
+    /* Full-machine x86 emulation with a GPU on top; tell frontends that
+     * schedule by it not to expect this to be cheap. Advisory only. */
+    unsigned perf_level = 15;
+    environ_cb(RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL, &perf_level);
+
     /* Whether the frontend accepts a NULL frame meaning "repeat the last
      * one". Without it we must always deliver pixels, even on frames the
      * frontend has told us it will discard. */
