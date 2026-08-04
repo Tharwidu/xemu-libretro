@@ -210,6 +210,8 @@ static bool build_system_path(char *dst, size_t dst_size, const char *name)
 /* Optional software frame output (delivers memory frames instead of the
  * hardware FBO; available via the xemu_frame_output core option). */
 static bool frame_readback = false;
+#define XBOX_NATIVE_WIDTH  640
+#define XBOX_NATIVE_HEIGHT 480
 #define READBACK_MAX_W 1920
 #define READBACK_MAX_H 1080
 static uint32_t readback_frame[READBACK_MAX_W * READBACK_MAX_H];
@@ -1249,13 +1251,29 @@ RETRO_API void retro_get_system_info(struct retro_system_info *info)
 RETRO_API void retro_get_system_av_info(struct retro_system_av_info *info)
 {
     memset(info, 0, sizeof(*info));
-    info->geometry.base_width   = 640;
-    info->geometry.base_height  = 480;
-    info->geometry.max_width    = 1920;
-    info->geometry.max_height   = 1080;
+
+    /* Base is the Xbox's native mode. The guest may present something else
+     * and the internal-resolution option scales it; SET_GEOMETRY reports
+     * whatever we actually deliver, per frame.
+     *
+     * max_* is what the frontend sizes its hardware-render framebuffer
+     * from, and it is a hard ceiling - a frame larger than this overruns
+     * that buffer. It must therefore cover the largest surface the current
+     * xemu_surface_scale can produce. The frontend queries AV info right
+     * after retro_load_game(), by which point the option has been read. */
+    unsigned scale = (unsigned)(opt_surface_scale > 0 ? opt_surface_scale : 1);
+
+    info->geometry.base_width   = XBOX_NATIVE_WIDTH;
+    info->geometry.base_height  = XBOX_NATIVE_HEIGHT;
+    info->geometry.max_width    = XBOX_NATIVE_WIDTH * scale;
+    info->geometry.max_height   = XBOX_NATIVE_HEIGHT * scale;
     info->geometry.aspect_ratio = 4.0f / 3.0f;
     info->timing.fps            = 59.94;
     info->timing.sample_rate    = 48000.0;
+
+    LRLOG_INFO("[xemu] AV info: %ux%u base, %ux%u max (scale %ux)\n",
+               info->geometry.base_width, info->geometry.base_height,
+               info->geometry.max_width, info->geometry.max_height, scale);
 }
 
 RETRO_API void retro_init(void)
@@ -2050,10 +2068,26 @@ RETRO_API void retro_run(void)
         GLuint tex = nv2a_get_framebuffer_surface();
         uintptr_t fbo = hw_render.get_current_framebuffer();
 
-        unsigned width = 640;
-        unsigned height = 480;
+        unsigned width = XBOX_NATIVE_WIDTH;
+        unsigned height = XBOX_NATIVE_HEIGHT;
 
         if (tex) {
+            /* Use the surface's real size rather than assuming the native
+             * mode. The Vulkan path already does this via
+             * nv2a_get_vk_display_info(); there is no equivalent accessor
+             * on the GL side, so query the texture the way upstream's own
+             * RenderFramebuffer() does. Reporting a fixed 640x480 here
+             * pinned output at native res and made xemu_surface_scale
+             * invisible on modern RetroArch. */
+            GLint tw = 0, th = 0;
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &tw);
+            glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &th);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            if (tw > 0 && th > 0) {
+                width = (unsigned)tw;
+                height = (unsigned)th;
+            }
             blit_nv2a_texture(tex, width, height, fbo);
         } else {
             /* No NV2A surface: present the VGA scanout (boot/legal/menu
@@ -2078,6 +2112,8 @@ RETRO_API void retro_run(void)
                              GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV,
                              readback_frame);
                 glBindTexture(GL_TEXTURE_2D, 0);
+                width = (unsigned)vw;
+                height = (unsigned)vh;
                 blit_nv2a_texture(vga_tex, width, height, fbo);
             } else {
                 /* Nothing at all yet: dark blue */
