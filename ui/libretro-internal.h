@@ -63,6 +63,14 @@ typedef struct LibretroEepromSettings {
 /* Apply the requested overrides to the EEPROM at `path`, recomputing whichever
  * checksums the change invalidates. Returns false and fills `err` on failure;
  * a no-op request succeeds without opening the file. */
+/* Xbox TV standard identifiers as stored in the EEPROM. */
+#define XC_VIDEO_STANDARD_NTSC_M 0x00400100u
+#define XC_VIDEO_STANDARD_NTSC_J 0x00400200u
+#define XC_VIDEO_STANDARD_PAL_I  0x00800300u
+
+/* Read the console's configured TV standard; 0 if unknown (assume NTSC). */
+uint32_t libretro_eeprom_read_video_standard(const char *path);
+
 bool libretro_eeprom_apply(const char *path,
                            const LibretroEepromSettings *settings,
                            char *err, size_t err_size);

@@ -58,6 +58,28 @@ static void eeprom_set_u32(uint8_t *p, uint32_t v)
     *(uint32_t *)p = cpu_to_le32(v);
 }
 
+/* Read the console's configured TV standard. Returns 0 if it cannot be
+ * determined, in which case callers should assume NTSC. */
+uint32_t libretro_eeprom_read_video_standard(const char *path)
+{
+    XboxEEPROM e;
+    FILE *f;
+
+    if (!path || !path[0]) {
+        return 0;
+    }
+    f = fopen(path, "rb");
+    if (!f) {
+        return 0;
+    }
+    size_t got = fread(&e, 1, sizeof(e), f);
+    fclose(f);
+    if (got != sizeof(e)) {
+        return 0;
+    }
+    return le32_to_cpu(e.video_standard);
+}
+
 bool libretro_eeprom_apply(const char *path,
                            const LibretroEepromSettings *settings,
                            char *err, size_t err_size)

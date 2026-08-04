@@ -190,6 +190,21 @@ static int      opt_eeprom_language = -1;
 static uint32_t opt_eeprom_video_standard = 0;
 static int      opt_eeprom_widescreen = -1;
 
+/* TV standard the console is actually wired for, read back from the EEPROM
+ * once the overrides above have been applied. Drives the frame rate we
+ * advertise, the region we report, and our own pacer. */
+static uint32_t console_video_standard = XC_VIDEO_STANDARD_NTSC_M;
+
+static bool console_is_pal(void)
+{
+    return console_video_standard == XC_VIDEO_STANDARD_PAL_I;
+}
+
+static double console_refresh_hz(void)
+{
+    return console_is_pal() ? 50.0 : 59.94;
+}
+
 
 /* Build "<system dir>/xemu/<name>" into dst. Returns false (and empties dst)
  * if the result would not fit, so an over-long system directory fails loudly
@@ -1268,9 +1283,11 @@ RETRO_API void retro_get_system_av_info(struct retro_system_av_info *info)
     info->geometry.max_width    = XBOX_NATIVE_WIDTH * scale;
     info->geometry.max_height   = XBOX_NATIVE_HEIGHT * scale;
     info->geometry.aspect_ratio = 4.0f / 3.0f;
-    info->timing.fps            = 59.94;
+    info->timing.fps            = console_refresh_hz();
     info->timing.sample_rate    = 48000.0;
 
+    LRLOG_INFO("[xemu] AV info: %s %.2f Hz\n",
+               console_is_pal() ? "PAL" : "NTSC", console_refresh_hz());
     LRLOG_INFO("[xemu] AV info: %ux%u base, %ux%u max (scale %ux)\n",
                info->geometry.base_width, info->geometry.base_height,
                info->geometry.max_width, info->geometry.max_height, scale);
@@ -1558,6 +1575,18 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
                            opt_eeprom_language, opt_eeprom_video_standard,
                            opt_eeprom_widescreen);
             }
+
+            /* Read back what the console is now set to, rather than what we
+             * asked for: on "auto" we asked for nothing, and the existing
+             * value is what the guest will obey. */
+            uint32_t vs = libretro_eeprom_read_video_standard(opt_eeprom_path);
+            if (vs != 0) {
+                console_video_standard = vs;
+            }
+            LRLOG_INFO("[xemu] Console TV standard: 0x%08x (%s, %.2f Hz)\n",
+                       console_video_standard,
+                       console_is_pal() ? "PAL" : "NTSC",
+                       console_refresh_hz());
         }
 
         /* Warn early about content that is not an xiso image (redump-style
@@ -1888,7 +1917,9 @@ RETRO_API void retro_run(void)
      * past and this block is a no-op. */
     {
         static int64_t next_frame_us;
-        const int64_t frame_us = 16683; /* 1 / 59.94 Hz */
+        /* Pace to the console's own refresh - 50 Hz on a PAL console -
+         * or we would self-pace at 60 while advertising 50. */
+        const int64_t frame_us = console_is_pal() ? 20000 : 16683;
         int64_t now_us = g_get_monotonic_time();
         if (next_frame_us == 0 || now_us > next_frame_us + 2 * frame_us) {
             next_frame_us = now_us; /* first frame, or resync after a stall */
@@ -2355,7 +2386,10 @@ RETRO_API size_t retro_get_memory_size(unsigned id) { (void)id; return 0; }
 /* Misc                                                                      */
 /* ========================================================================= */
 
-RETRO_API unsigned retro_get_region(void) { return RETRO_REGION_NTSC; }
+RETRO_API unsigned retro_get_region(void)
+{
+    return console_is_pal() ? RETRO_REGION_PAL : RETRO_REGION_NTSC;
+}
 RETRO_API void retro_cheat_reset(void) {}
 RETRO_API void retro_cheat_set(unsigned index, bool enabled, const char *code)
 {
