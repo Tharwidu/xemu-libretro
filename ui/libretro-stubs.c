@@ -182,8 +182,29 @@ void xemu_input_update_controller(ControllerState *state)
 
 void xemu_input_update_rumble(ControllerState *state)
 {
-    /* TODO: Use RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE to send rumble */
-    (void)state;
+    if (!state || !libretro_rumble.set_rumble_state) {
+        return;
+    }
+
+    int port = state->bound;
+    if (port < 0 || port >= 4) {
+        return;
+    }
+
+    /* The Xbox's left actuator is the low-frequency one, matching
+     * libretro's "strong" motor; the right is the high-frequency "weak".
+     * Both are already 16-bit, the same range set_rumble_state takes. */
+    static uint16_t last_l[4], last_r[4];
+    if (state->rumble_l == last_l[port] && state->rumble_r == last_r[port]) {
+        return; /* nothing changed; do not re-send every frame */
+    }
+    last_l[port] = state->rumble_l;
+    last_r[port] = state->rumble_r;
+
+    libretro_rumble.set_rumble_state(port, RETRO_RUMBLE_STRONG,
+                                     state->rumble_l);
+    libretro_rumble.set_rumble_state(port, RETRO_RUMBLE_WEAK,
+                                     state->rumble_r);
 }
 
 void libretro_input_create_xid_devices(void)

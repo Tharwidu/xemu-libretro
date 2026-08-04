@@ -233,6 +233,7 @@ static bool frame_readback = false;
 static bool frontend_can_dupe = false;
 /* Defined here, read by the input bridge in libretro-stubs.c. */
 bool libretro_input_bitmasks = false;
+struct retro_rumble_interface libretro_rumble;
 /* Size of the last frame actually delivered, so duplicate frames can be
  * announced at the dimensions the frontend already has. */
 static unsigned last_frame_width  = XBOX_NATIVE_WIDTH;
@@ -1200,22 +1201,6 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     bool no_game = false;
     environ_cb(RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME, &no_game);
 
-    /* Whether the frontend accepts a NULL frame meaning "repeat the last
-     * one". Without it we must always deliver pixels, even on frames the
-     * frontend has told us it will discard. */
-    frontend_can_dupe = false;
-    if (!environ_cb(RETRO_ENVIRONMENT_GET_CAN_DUPE, &frontend_can_dupe)) {
-        frontend_can_dupe = false;
-    }
-    LRLOG_INFO("[xemu] Frontend frame duping: %s\n",
-               frontend_can_dupe ? "yes" : "no");
-
-    /* Whether one call per port can return every digital button at once.
-     * RetroArch 1.7.5 does not support this and takes the per-button path. */
-    libretro_input_bitmasks = environ_cb(RETRO_ENVIRONMENT_GET_INPUT_BITMASKS,
-                                         NULL);
-    LRLOG_INFO("[xemu] Frontend input bitmasks: %s\n",
-               libretro_input_bitmasks ? "yes" : "no");
 
     /* Get VFS interface */
     struct retro_vfs_interface_info vfs_info = { 3, NULL };
@@ -1401,6 +1386,49 @@ static void log_system_file_hash(const char *label, const char *path,
     g_free(data);
 }
 
+/* Probe optional frontend capabilities.
+ *
+ * Deliberately NOT done in retro_set_environment: RetroArch calls that more
+ * than once, and the later calls pass a restricted callback that refuses
+ * these queries - caching a result from one of those left every capability
+ * reading "no". Do it once per content load, where the callback is the real
+ * one. */
+static void probe_frontend_caps(void)
+{
+    if (!environ_cb) {
+        return;
+    }
+
+    /* Whether the frontend accepts a NULL frame meaning "repeat the last
+     * one". Without it we must always deliver pixels, even on frames the
+     * frontend has told us it will discard. */
+    frontend_can_dupe = false;
+    if (!environ_cb(RETRO_ENVIRONMENT_GET_CAN_DUPE, &frontend_can_dupe)) {
+        frontend_can_dupe = false;
+    }
+
+    /* Whether one call per port can return every digital button at once.
+     * RetroArch 1.7.5 does not support this and takes the per-button path. */
+    libretro_input_bitmasks =
+        environ_cb(RETRO_ENVIRONMENT_GET_INPUT_BITMASKS, NULL);
+
+    /* The Duke and Controller S both have motors and xemu drives them from
+     * the guest; hand those strengths to the frontend. The call succeeding
+     * only means the frontend implements the interface, not that a pad with
+     * motors is attached. */
+    memset(&libretro_rumble, 0, sizeof(libretro_rumble));
+    if (!environ_cb(RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE,
+                    &libretro_rumble)) {
+        memset(&libretro_rumble, 0, sizeof(libretro_rumble));
+    }
+
+    LRLOG_INFO("[xemu] Frontend: frame duping %s, input bitmasks %s, "
+               "rumble %s\n",
+               frontend_can_dupe ? "yes" : "no",
+               libretro_input_bitmasks ? "yes" : "no",
+               libretro_rumble.set_rumble_state ? "yes" : "no");
+}
+
 RETRO_API bool retro_load_game(const struct retro_game_info *game)
 {
     LRLOG_INFO("[xemu] retro_load_game called\n");
@@ -1413,6 +1441,8 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
     LRLOG_INFO("[xemu] Loading game: %s\n", game->path);
 
     /* Read core options */
+    probe_frontend_caps();
+
     update_variables();
 
     /* Store the DVD path */

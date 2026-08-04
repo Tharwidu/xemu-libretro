@@ -24,6 +24,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "libretro.h"
+
 /*
  * Declarations shared between ui/libretro.c and the stub translation units
  * that stand in for xemu's SDL/ImGui frontend. Not part of the libretro API;
@@ -37,6 +39,9 @@ void libretro_settings_set_base_path(const char *path);
 /* True when the frontend can return all digital buttons in one call per
  * port. Set during retro_set_environment; read by the input bridge. */
 extern bool libretro_input_bitmasks;
+
+/* Frontend rumble interface; set_rumble_state is NULL when unavailable. */
+extern struct retro_rumble_interface libretro_rumble;
 
 /* ui/libretro-stubs.c: attach the emulated Xbox controllers. */
 void libretro_input_create_xid_devices(void);
