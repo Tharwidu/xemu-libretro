@@ -94,6 +94,16 @@ int xemu_input_get_test_mode(void)
     return 0;
 }
 
+/* Read one digital button, from the port's bitmask when we have one and
+ * from the frontend directly otherwise. */
+static bool joypad_button(int port, int16_t mask, bool have_mask, unsigned id)
+{
+    if (have_mask) {
+        return (mask & (1 << id)) != 0;
+    }
+    return input_state_cb(port, RETRO_DEVICE_JOYPAD, 0, id) != 0;
+}
+
 void xemu_input_update_controller(ControllerState *state)
 {
     if (!state || !input_state_cb) return;
@@ -104,50 +114,59 @@ void xemu_input_update_controller(ControllerState *state)
     state->buttons = 0;
     memset(state->axis, 0, sizeof(state->axis));
 
-    if (input_state_cb(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B))
+    /* One call per port instead of sixteen when the frontend supports it;
+     * RetroArch 1.7.5 does not, and takes the per-button path below. */
+    int16_t mask = 0;
+    const bool have_mask = libretro_input_bitmasks;
+    if (have_mask) {
+        mask = input_state_cb(port, RETRO_DEVICE_JOYPAD, 0,
+                              RETRO_DEVICE_ID_JOYPAD_MASK);
+    }
+
+    if (joypad_button(port, mask, have_mask, RETRO_DEVICE_ID_JOYPAD_B))
         state->buttons |= CONTROLLER_BUTTON_A;
-    if (input_state_cb(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A))
+    if (joypad_button(port, mask, have_mask, RETRO_DEVICE_ID_JOYPAD_A))
         state->buttons |= CONTROLLER_BUTTON_B;
-    if (input_state_cb(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y))
+    if (joypad_button(port, mask, have_mask, RETRO_DEVICE_ID_JOYPAD_Y))
         state->buttons |= CONTROLLER_BUTTON_X;
-    if (input_state_cb(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X))
+    if (joypad_button(port, mask, have_mask, RETRO_DEVICE_ID_JOYPAD_X))
         state->buttons |= CONTROLLER_BUTTON_Y;
 
-    if (input_state_cb(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L))
+    if (joypad_button(port, mask, have_mask, RETRO_DEVICE_ID_JOYPAD_L))
         state->buttons |= CONTROLLER_BUTTON_WHITE;
-    if (input_state_cb(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R))
+    if (joypad_button(port, mask, have_mask, RETRO_DEVICE_ID_JOYPAD_R))
         state->buttons |= CONTROLLER_BUTTON_BLACK;
 
-    if (input_state_cb(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT))
+    if (joypad_button(port, mask, have_mask, RETRO_DEVICE_ID_JOYPAD_SELECT))
         state->buttons |= CONTROLLER_BUTTON_BACK;
-    if (input_state_cb(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START))
+    if (joypad_button(port, mask, have_mask, RETRO_DEVICE_ID_JOYPAD_START))
         state->buttons |= CONTROLLER_BUTTON_START;
 
-    if (input_state_cb(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3))
+    if (joypad_button(port, mask, have_mask, RETRO_DEVICE_ID_JOYPAD_L3))
         state->buttons |= CONTROLLER_BUTTON_LSTICK;
-    if (input_state_cb(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3))
+    if (joypad_button(port, mask, have_mask, RETRO_DEVICE_ID_JOYPAD_R3))
         state->buttons |= CONTROLLER_BUTTON_RSTICK;
 
-    if (input_state_cb(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP))
+    if (joypad_button(port, mask, have_mask, RETRO_DEVICE_ID_JOYPAD_UP))
         state->buttons |= CONTROLLER_BUTTON_DPAD_UP;
-    if (input_state_cb(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN))
+    if (joypad_button(port, mask, have_mask, RETRO_DEVICE_ID_JOYPAD_DOWN))
         state->buttons |= CONTROLLER_BUTTON_DPAD_DOWN;
-    if (input_state_cb(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT))
+    if (joypad_button(port, mask, have_mask, RETRO_DEVICE_ID_JOYPAD_LEFT))
         state->buttons |= CONTROLLER_BUTTON_DPAD_LEFT;
-    if (input_state_cb(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT))
+    if (joypad_button(port, mask, have_mask, RETRO_DEVICE_ID_JOYPAD_RIGHT))
         state->buttons |= CONTROLLER_BUTTON_DPAD_RIGHT;
 
     int16_t lt = input_state_cb(port, RETRO_DEVICE_ANALOG,
                                 RETRO_DEVICE_INDEX_ANALOG_BUTTON,
                                 RETRO_DEVICE_ID_JOYPAD_L2);
-    if (lt == 0 && input_state_cb(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2))
+    if (lt == 0 && joypad_button(port, mask, have_mask, RETRO_DEVICE_ID_JOYPAD_L2))
         lt = 0x7FFF;
     state->axis[CONTROLLER_AXIS_LTRIG] = lt;
 
     int16_t rt = input_state_cb(port, RETRO_DEVICE_ANALOG,
                                 RETRO_DEVICE_INDEX_ANALOG_BUTTON,
                                 RETRO_DEVICE_ID_JOYPAD_R2);
-    if (rt == 0 && input_state_cb(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2))
+    if (rt == 0 && joypad_button(port, mask, have_mask, RETRO_DEVICE_ID_JOYPAD_R2))
         rt = 0x7FFF;
     state->axis[CONTROLLER_AXIS_RTRIG] = rt;
 

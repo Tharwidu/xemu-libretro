@@ -231,6 +231,8 @@ static bool frame_readback = false;
 #define XBOX_NATIVE_HEIGHT 480
 
 static bool frontend_can_dupe = false;
+/* Defined here, read by the input bridge in libretro-stubs.c. */
+bool libretro_input_bitmasks = false;
 /* Size of the last frame actually delivered, so duplicate frames can be
  * announced at the dimensions the frontend already has. */
 static unsigned last_frame_width  = XBOX_NATIVE_WIDTH;
@@ -1207,6 +1209,13 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     }
     LRLOG_INFO("[xemu] Frontend frame duping: %s\n",
                frontend_can_dupe ? "yes" : "no");
+
+    /* Whether one call per port can return every digital button at once.
+     * RetroArch 1.7.5 does not support this and takes the per-button path. */
+    libretro_input_bitmasks = environ_cb(RETRO_ENVIRONMENT_GET_INPUT_BITMASKS,
+                                         NULL);
+    LRLOG_INFO("[xemu] Frontend input bitmasks: %s\n",
+               libretro_input_bitmasks ? "yes" : "no");
 
     /* Get VFS interface */
     struct retro_vfs_interface_info vfs_info = { 3, NULL };

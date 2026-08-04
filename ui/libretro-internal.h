@@ -34,6 +34,10 @@
  * frontend gave us, in place of xemu's own config discovery. */
 void libretro_settings_set_base_path(const char *path);
 
+/* True when the frontend can return all digital buttons in one call per
+ * port. Set during retro_set_environment; read by the input bridge. */
+extern bool libretro_input_bitmasks;
+
 /* ui/libretro-stubs.c: attach the emulated Xbox controllers. */
 void libretro_input_create_xid_devices(void);
 
