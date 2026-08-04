@@ -39,6 +39,12 @@ int nv2a_vk_export_display_fd(void);
 /* Tiling the Vulkan display image was created with. An importer on another
  * device must create its image with the same tiling. */
 bool nv2a_vk_display_uses_optimal_tiling(void);
+
+/* Vulkan display readback, mirroring the OpenGL pair above: the copy runs
+ * on the emulation thread, retro_run takes finished frames from here. */
+void nv2a_vk_display_readback_set_enabled(bool enable);
+bool nv2a_vk_get_display_frame(uint32_t *dst, int dst_cap_pixels,
+                               int *out_width, int *out_height);
 /* Non-blocking: trigger PFIFO to render display image, returns immediately.
  * The display image will be updated asynchronously by the PFIFO thread. */
 void nv2a_trigger_display_render(void);

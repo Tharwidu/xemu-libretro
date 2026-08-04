@@ -1067,6 +1067,233 @@ void pgraph_vk_finalize_display(PGRAPHState *pg)
     destroy_descriptor_pool(pg);
 }
 
+#ifdef LIBRETRO
+/* ------------------------------------------------------------------ *
+ * Display readback for the libretro software frame path.
+ *
+ * Mirrors the OpenGL capture in pgraph/gl/display.c: the copy runs on the
+ * PFIFO thread, where the device and command pool are owned, and
+ * retro_run only takes a completed frame from a plain CPU buffer. Doing
+ * the Vulkan work from the frontend thread instead would race with the
+ * emulation thread's use of the device.
+ * ------------------------------------------------------------------ */
+
+static struct {
+    bool inited;
+    bool enabled;
+    bool has_frame;
+    QemuMutex lock;
+    uint32_t *pixels;
+    int width, height;
+    VkBuffer buffer;
+    VkDeviceMemory memory;
+    VkDeviceSize buffer_size;
+} vk_readback;
+
+void nv2a_vk_display_readback_set_enabled(bool enable)
+{
+    if (!vk_readback.inited) {
+        qemu_mutex_init(&vk_readback.lock);
+        vk_readback.inited = true;
+    }
+    vk_readback.enabled = enable;
+}
+
+bool nv2a_vk_get_display_frame(uint32_t *dst, int dst_cap_pixels,
+                               int *out_width, int *out_height)
+{
+    if (!vk_readback.inited || !vk_readback.enabled) {
+        return false;
+    }
+    qemu_mutex_lock(&vk_readback.lock);
+    int w = vk_readback.width, h = vk_readback.height;
+    if (!vk_readback.has_frame || w <= 0 || h <= 0 ||
+        w * h > dst_cap_pixels) {
+        qemu_mutex_unlock(&vk_readback.lock);
+        return false;
+    }
+    /* vkCmdCopyImageToBuffer writes top-down, which is what the frontend
+     * wants - no row flip, unlike the GL path. */
+    memcpy(dst, vk_readback.pixels, (size_t)w * h * sizeof(uint32_t));
+    *out_width = w;
+    *out_height = h;
+    qemu_mutex_unlock(&vk_readback.lock);
+    return true;
+}
+
+static void destroy_readback_buffer(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    if (vk_readback.buffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(r->device, vk_readback.buffer, NULL);
+        vk_readback.buffer = VK_NULL_HANDLE;
+    }
+    if (vk_readback.memory != VK_NULL_HANDLE) {
+        vkFreeMemory(r->device, vk_readback.memory, NULL);
+        vk_readback.memory = VK_NULL_HANDLE;
+    }
+    vk_readback.buffer_size = 0;
+}
+
+static bool ensure_readback_buffer(PGRAPHState *pg, VkDeviceSize size)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    if (vk_readback.buffer != VK_NULL_HANDLE &&
+        vk_readback.buffer_size >= size) {
+        return true;
+    }
+    destroy_readback_buffer(pg);
+
+    VkBufferCreateInfo buffer_ci = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = size,
+        .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+    if (vkCreateBuffer(r->device, &buffer_ci, NULL, &vk_readback.buffer) !=
+        VK_SUCCESS) {
+        vk_readback.buffer = VK_NULL_HANDLE;
+        return false;
+    }
+
+    VkMemoryRequirements reqs;
+    vkGetBufferMemoryRequirements(r->device, vk_readback.buffer, &reqs);
+
+    VkMemoryAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = reqs.size,
+        .memoryTypeIndex = pgraph_vk_get_memory_type(
+            pg, reqs.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+    };
+    if (vkAllocateMemory(r->device, &alloc_info, NULL, &vk_readback.memory) !=
+        VK_SUCCESS) {
+        vkDestroyBuffer(r->device, vk_readback.buffer, NULL);
+        vk_readback.buffer = VK_NULL_HANDLE;
+        vk_readback.memory = VK_NULL_HANDLE;
+        return false;
+    }
+    vkBindBufferMemory(r->device, vk_readback.buffer, vk_readback.memory, 0);
+    vk_readback.buffer_size = size;
+    return true;
+}
+
+/* pgraph_vk_transition_image_layout() has no case for the shader-read <->
+ * transfer-src pair this capture needs, and it is shared with the rest of
+ * the renderer, so emit the barrier here rather than widening it. */
+static void readback_transition(VkCommandBuffer cmd, VkImage image,
+                                bool to_transfer_src)
+{
+    VkImageMemoryBarrier barrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .oldLayout = to_transfer_src ?
+                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL :
+                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        .newLayout = to_transfer_src ?
+                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL :
+                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .srcAccessMask = to_transfer_src ? VK_ACCESS_SHADER_READ_BIT
+                                         : VK_ACCESS_TRANSFER_READ_BIT,
+        .dstAccessMask = to_transfer_src ? VK_ACCESS_TRANSFER_READ_BIT
+                                         : VK_ACCESS_SHADER_READ_BIT,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .levelCount = 1,
+            .layerCount = 1,
+        },
+    };
+
+    VkPipelineStageFlags src_stage = to_transfer_src ?
+                                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT :
+                                         VK_PIPELINE_STAGE_TRANSFER_BIT;
+    VkPipelineStageFlags dst_stage = to_transfer_src ?
+                                         VK_PIPELINE_STAGE_TRANSFER_BIT :
+                                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+
+    vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, NULL, 0, NULL, 1,
+                         &barrier);
+}
+
+/* PFIFO thread. The display image is left in SHADER_READ_ONLY_OPTIMAL by
+ * render_display(); borrow it for the copy and hand it back in the same
+ * layout. */
+static void capture_display_frame_vk(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    PGRAPHVkDisplayState *disp = &r->display;
+
+    if (!vk_readback.inited || !vk_readback.enabled) {
+        return;
+    }
+    if (disp->image == VK_NULL_HANDLE || !disp->width || !disp->height) {
+        return;
+    }
+
+    const int w = disp->width, h = disp->height;
+    const VkDeviceSize size = (VkDeviceSize)w * h * 4;
+
+    if (!ensure_readback_buffer(pg, size)) {
+        return;
+    }
+
+    VkCommandBuffer cmd = pgraph_vk_begin_single_time_commands(pg);
+
+    readback_transition(cmd, disp->image, true);
+
+    VkBufferImageCopy region = {
+        .bufferOffset = 0,
+        .bufferRowLength = 0,
+        .bufferImageHeight = 0,
+        .imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .imageSubresource.mipLevel = 0,
+        .imageSubresource.baseArrayLayer = 0,
+        .imageSubresource.layerCount = 1,
+        .imageOffset = { 0, 0, 0 },
+        .imageExtent = { w, h, 1 },
+    };
+    vkCmdCopyImageToBuffer(cmd, disp->image,
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           vk_readback.buffer, 1, &region);
+
+    readback_transition(cmd, disp->image, false);
+
+    pgraph_vk_end_single_time_commands(pg, cmd);
+
+    void *mapped = NULL;
+    if (vkMapMemory(r->device, vk_readback.memory, 0, size, 0, &mapped) !=
+        VK_SUCCESS) {
+        return;
+    }
+
+    qemu_mutex_lock(&vk_readback.lock);
+    if (vk_readback.width != w || vk_readback.height != h ||
+        vk_readback.pixels == NULL) {
+        g_free(vk_readback.pixels);
+        vk_readback.pixels = g_malloc((size_t)w * h * sizeof(uint32_t));
+        vk_readback.width = w;
+        vk_readback.height = h;
+    }
+
+    /* The image is R8G8B8A8_UNORM: bytes R,G,B,A. XRGB8888 wants
+     * 0x00RRGGBB, so red and blue swap. */
+    const uint8_t *src = mapped;
+    uint32_t *out = vk_readback.pixels;
+    for (size_t i = 0, n = (size_t)w * h; i < n; i++, src += 4) {
+        out[i] = ((uint32_t)src[0] << 16) | ((uint32_t)src[1] << 8) |
+                 (uint32_t)src[2];
+    }
+    vk_readback.has_frame = true;
+    qemu_mutex_unlock(&vk_readback.lock);
+
+    vkUnmapMemory(r->device, vk_readback.memory);
+}
+#endif /* LIBRETRO */
+
 void pgraph_vk_render_display(PGRAPHState *pg)
 {
     NV2AState *d = container_of(pg, NV2AState, pgraph);
@@ -1098,4 +1325,8 @@ void pgraph_vk_render_display(PGRAPHState *pg)
     }
 
     render_display(pg, surface);
+
+#ifdef LIBRETRO
+    capture_display_frame_vk(pg);
+#endif
 }

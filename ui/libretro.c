@@ -1863,9 +1863,6 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
      * software readback mode) and a Win32 handle (so not on POSIX). Both
      * limits are the frame-delivery side, not the renderer. */
     const char *vk_blocked_by = NULL;
-    if (frame_readback) {
-        vk_blocked_by = "software readback mode has no Vulkan display path";
-    }
 
     bool want_vulkan;
     switch (opt_renderer) {
@@ -1905,7 +1902,11 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
          * with the frontend's pixel format discovered by enumerating our
          * process's windows (correct rendering depends on the pixel
          * format; sharing is avoided — broken under Proton). */
-        use_vulkan = false;
+        /* The renderer choice still stands: xemu's Vulkan backend creates
+         * its own instance and device, so it does not need the frontend to
+         * negotiate anything. Frames reach the frontend through readback
+         * either way. */
+        use_vulkan = want_vulkan;
     } else {
     /* Setup hardware rendering based on frontend preference */
     memset(&hw_render, 0, sizeof(hw_render));
@@ -1976,8 +1977,13 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
     populate_config(opt_dvd_path);
 
     if (frame_readback) {
-        nv2a_gl_display_readback_set_enabled(true);
-        LRLOG_INFO("[xemu] Software output; GL context setup deferred to first retro_run\n");
+        if (use_vulkan) {
+            nv2a_vk_display_readback_set_enabled(true);
+        } else {
+            nv2a_gl_display_readback_set_enabled(true);
+        }
+        LRLOG_INFO("[xemu] Software output via %s; GL context setup deferred "
+                   "to first retro_run\n", use_vulkan ? "Vulkan" : "OpenGL");
     } else if (getenv("XEMU_DUMP_DISPLAY")) {
         /* Debug: enable the capture (and its PPM dump) in HW mode too */
         nv2a_gl_display_readback_set_enabled(true);
@@ -2314,7 +2320,14 @@ RETRO_API void retro_run(void)
             goto readback_done;
         }
 
-        if (pg_tex) {
+        if (use_vulkan) {
+            /* The Vulkan capture runs on the emulation thread off the back
+             * of render_display, so there is no surface handle to check
+             * first - a frame is either ready or it is not. */
+            got = nv2a_vk_get_display_frame(readback_frame,
+                                            READBACK_MAX_W * READBACK_MAX_H,
+                                            &w, &h);
+        } else if (pg_tex) {
             got = nv2a_gl_get_display_frame(readback_frame,
                                             READBACK_MAX_W * READBACK_MAX_H,
                                             &w, &h);
