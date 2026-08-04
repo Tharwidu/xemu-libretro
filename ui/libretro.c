@@ -185,6 +185,12 @@ static int  opt_filtering = CONFIG_DISPLAY_FILTERING_LINEAR;
 static int  opt_audio_volume = 100;
 static int  opt_network_backend = 0; /* 0=disabled, 1=nat */
 static int  opt_frame_output = 0; /* 0=auto, 1=hardware, 2=software */
+/* Which NV2A renderer to use: 0=auto (follow the frontend's context type),
+ * 1=force OpenGL, 2=force Vulkan. */
+#define RENDERER_AUTO   0
+#define RENDERER_OPENGL 1
+#define RENDERER_VULKAN 2
+static int  opt_renderer = RENDERER_AUTO;
 /* EEPROM (guest-persistent) settings; "leave unchanged" by default. */
 static int      opt_eeprom_language = -1;
 static uint32_t opt_eeprom_video_standard = 0;
@@ -963,6 +969,14 @@ static void update_variables(void)
         else                              opt_filtering = CONFIG_DISPLAY_FILTERING_LINEAR;
     }
 
+    var.key = "xemu_renderer";
+    var.value = NULL;
+    opt_renderer = RENDERER_AUTO;
+    if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+        if (!strcmp(var.value, "opengl"))      opt_renderer = RENDERER_OPENGL;
+        else if (!strcmp(var.value, "vulkan")) opt_renderer = RENDERER_VULKAN;
+    }
+
     var.key = "xemu_frame_output";
     var.value = NULL;
     if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
@@ -1726,18 +1740,59 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
     }
     LRLOG_INFO("[xemu] Frontend preferred HW render: %u\n", preferred_hw);
 
-    bool want_vulkan = (preferred_hw == RETRO_HW_CONTEXT_VULKAN);
+    /* Renderer selection.
+     *
+     * The internal NV2A renderer and the frontend's context type are two
+     * independent choices that used to be assigned from one variable, so
+     * the Vulkan renderer was reachable only when the frontend happened to
+     * negotiate a Vulkan context. xemu_renderer separates them; "auto"
+     * keeps the old behaviour exactly.
+     *
+     * What the Vulkan renderer can be fed today is narrower than what it
+     * can render: its display image is handed to the frontend through
+     * external memory, which needs a negotiated Vulkan context (so not in
+     * software readback mode) and a Win32 handle (so not on POSIX). Both
+     * limits are the frame-delivery side, not the renderer. */
+    const char *vk_blocked_by = NULL;
+    if (frame_readback) {
+        vk_blocked_by = "software readback mode has no Vulkan display path";
+    }
 #ifndef _WIN32
-    /* Vulkan display sharing (external memory import into the frontend's
-     * VkDevice) is only implemented with Win32 handles so far; request
-     * OpenGL instead of negotiating a Vulkan context we cannot feed. */
-    if (want_vulkan) {
-        LRLOG_INFO("[xemu] Frontend prefers Vulkan, but Vulkan display "
-                   "sharing is not yet supported on this platform; "
-                   "requesting OpenGL\n");
-        want_vulkan = false;
+    if (!vk_blocked_by) {
+        vk_blocked_by = "Vulkan display sharing needs a Win32 handle so far";
     }
 #endif
+
+    bool want_vulkan;
+    switch (opt_renderer) {
+    case RENDERER_OPENGL:
+        want_vulkan = false;
+        break;
+    case RENDERER_VULKAN:
+        want_vulkan = true;
+        break;
+    default:
+        want_vulkan = (preferred_hw == RETRO_HW_CONTEXT_VULKAN);
+        break;
+    }
+
+    if (want_vulkan && vk_blocked_by) {
+        if (opt_renderer == RENDERER_VULKAN) {
+            /* The user asked for it explicitly; say why they did not get
+             * it rather than silently rendering with the other backend. */
+            LRLOG_ERROR("[xemu] Vulkan renderer requested but unavailable: "
+                        "%s. Using OpenGL.\n", vk_blocked_by);
+        } else {
+            LRLOG_INFO("[xemu] Frontend prefers Vulkan but %s; "
+                       "requesting OpenGL\n", vk_blocked_by);
+        }
+        want_vulkan = false;
+    }
+
+    LRLOG_INFO("[xemu] Renderer: %s (option: %s)\n",
+               want_vulkan ? "Vulkan" : "OpenGL",
+               opt_renderer == RENDERER_OPENGL ? "opengl" :
+               opt_renderer == RENDERER_VULKAN ? "vulkan" : "auto");
 
     if (frame_readback) {
         /* Pure software core: the frontend must render our frames itself

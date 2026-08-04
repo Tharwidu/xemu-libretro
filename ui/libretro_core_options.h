@@ -238,6 +238,21 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         "100"
     },
     {
+        "xemu_renderer",
+        "Renderer",
+        NULL,
+        "Which NV2A renderer the emulator uses internally. 'Auto' follows the frontend's hardware-render context. Vulkan currently requires the Hardware (FBO) frame output mode on Windows; elsewhere the core falls back to OpenGL and says so in the log. Requires restart.",
+        NULL,
+        "video",
+        {
+            { "auto",   "Auto" },
+            { "opengl", "OpenGL" },
+            { "vulkan", "Vulkan" },
+            { NULL, NULL },
+        },
+        "auto"
+    },
+    {
         "xemu_frame_output",
         "Frame Output Mode",
         NULL,
