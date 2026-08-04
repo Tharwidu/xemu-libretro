@@ -512,10 +512,6 @@ static void ra_vk_resolve_functions(void)
     }
 }
 
-#ifdef _WIN32
-/* Only ra_vk_import_display() needs this, and that is Win32-only for now
- * because the import side expects an external-memory HANDLE. Drop the guard
- * once the opaque-fd import lands and POSIX uses this path too. */
 static uint32_t ra_vk_find_memory_type(uint32_t type_bits, VkMemoryPropertyFlags props)
 {
     VkPhysicalDeviceMemoryProperties mem_props;
@@ -528,7 +524,6 @@ static uint32_t ra_vk_find_memory_type(uint32_t type_bits, VkMemoryPropertyFlags
     }
     return 0;
 }
-#endif
 
 static void ra_vk_transition_layout(VkImage image, VkImageLayout old_layout, VkImageLayout new_layout)
 {
@@ -614,12 +609,124 @@ static void ra_vk_cleanup_display(void)
 static bool ra_vk_import_display(void *ext_handle, int width, int height)
 {
 #ifndef _WIN32
-    /* Import uses Win32 external-memory handles; on other platforms the
-     * Vulkan context is never negotiated (see retro_load_game). */
+    /* POSIX: the emulator exports its display allocation as an opaque fd.
+     * Unlike a Win32 handle, importing an fd CONSUMES it - the driver takes
+     * ownership - so a fresh one is exported per import and never reused. */
     (void)ext_handle;
-    (void)width;
-    (void)height;
-    return false;
+
+    if (!vulkan_if || !ra_vk_funcs_resolved || !width || !height) {
+        return false;
+    }
+
+    VkDevice dev = vulkan_if->device;
+
+    if (ra_vk_image != VK_NULL_HANDLE &&
+        (uint32_t)width == ra_vk_width && (uint32_t)height == ra_vk_height) {
+        return true; /* already imported at this size */
+    }
+
+    ra_vk_cleanup_display();
+
+    int fd = nv2a_vk_export_display_fd();
+    if (fd < 0) {
+        LRLOG_ERROR("[xemu] Could not export the display memory fd\n");
+        return false;
+    }
+
+    VkExternalMemoryImageCreateInfo ext_img_ci = {
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+        .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
+    };
+
+    VkImageCreateInfo img_ci = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext = &ext_img_ci,
+        .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = VK_FORMAT_R8G8B8A8_UNORM,
+        .extent = { width, height, 1 },
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = nv2a_vk_display_uses_optimal_tiling()
+                      ? VK_IMAGE_TILING_OPTIMAL
+                      : VK_IMAGE_TILING_LINEAR,
+        .usage = VK_IMAGE_USAGE_SAMPLED_BIT |
+                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+
+    if (ra_vkCreateImage(dev, &img_ci, NULL, &ra_vk_image) != VK_SUCCESS) {
+        close(fd);
+        LRLOG_ERROR("[xemu] vkCreateImage failed for the imported display\n");
+        return false;
+    }
+
+    VkMemoryRequirements mem_reqs;
+    ra_vkGetImageMemoryRequirements(dev, ra_vk_image, &mem_reqs);
+
+    VkImportMemoryFdInfoKHR import_info = {
+        .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
+        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
+        .fd = fd,
+    };
+
+    VkMemoryAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = &import_info,
+        .allocationSize = mem_reqs.size,
+        .memoryTypeIndex =
+            ra_vk_find_memory_type(mem_reqs.memoryTypeBits,
+                                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+    };
+
+    VkResult res = ra_vkAllocateMemory(dev, &alloc_info, NULL, &ra_vk_memory);
+    if (res != VK_SUCCESS) {
+        /* The import did not happen, so the descriptor is still ours. */
+        close(fd);
+        ra_vkDestroyImage(dev, ra_vk_image, NULL);
+        ra_vk_image = VK_NULL_HANDLE;
+        LRLOG_ERROR("[xemu] Importing the display fd failed (VkResult %d). "
+                    "The frontend's Vulkan device most likely lacks "
+                    "VK_KHR_external_memory_fd\n", (int)res);
+        return false;
+    }
+    /* From here the driver owns the fd; do not close it. */
+
+    if (ra_vkBindImageMemory(dev, ra_vk_image, ra_vk_memory, 0) != VK_SUCCESS) {
+        ra_vk_cleanup_display();
+        LRLOG_ERROR("[xemu] vkBindImageMemory failed for the imported "
+                    "display\n");
+        return false;
+    }
+
+    VkImageViewCreateInfo view_ci = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = ra_vk_image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = VK_FORMAT_R8G8B8A8_UNORM,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .levelCount = 1,
+            .layerCount = 1,
+        },
+    };
+    if (ra_vkCreateImageView(dev, &view_ci, NULL, &ra_vk_image_view) !=
+        VK_SUCCESS) {
+        ra_vk_cleanup_display();
+        LRLOG_ERROR("[xemu] vkCreateImageView failed for the imported "
+                    "display\n");
+        return false;
+    }
+
+    ra_vk_view_ci = view_ci;
+    ra_vk_width = (uint32_t)width;
+    ra_vk_height = (uint32_t)height;
+    LRLOG_INFO("[xemu] Imported the display image over an opaque fd "
+               "(%dx%d)\n", width, height);
+    return true;
 #else
     if (!vulkan_if || !ra_vk_funcs_resolved || !ext_handle || !width || !height)
         return false;
@@ -654,7 +761,9 @@ static bool ra_vk_import_display(void *ext_handle, int width, int height)
         .mipLevels = 1,
         .arrayLayers = 1,
         .samples = VK_SAMPLE_COUNT_1_BIT,
-        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .tiling = nv2a_vk_display_uses_optimal_tiling()
+                      ? VK_IMAGE_TILING_OPTIMAL
+                      : VK_IMAGE_TILING_LINEAR,
         .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
@@ -1757,11 +1866,6 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
     if (frame_readback) {
         vk_blocked_by = "software readback mode has no Vulkan display path";
     }
-#ifndef _WIN32
-    if (!vk_blocked_by) {
-        vk_blocked_by = "Vulkan display sharing needs a Win32 handle so far";
-    }
-#endif
 
     bool want_vulkan;
     switch (opt_renderer) {
@@ -2345,7 +2449,15 @@ readback_done:
         int disp_w = 0, disp_h = 0;
         nv2a_get_vk_display_info(&ext_handle, &disp_w, &disp_h);
 
-        if (ext_handle && disp_w > 0 && disp_h > 0) {
+        /* Win32 hands us the external-memory HANDLE here; POSIX exports a
+         * fresh fd inside the import instead, so only the dimensions gate
+         * it there. */
+#ifdef _WIN32
+        const bool have_display = (ext_handle != NULL);
+#else
+        const bool have_display = true;
+#endif
+        if (have_display && disp_w > 0 && disp_h > 0) {
             /* Import xemu's display image into RA's VkDevice */
             static bool vk_layout_set = false;
             if (ra_vk_import_display(ext_handle, disp_w, disp_h)) {

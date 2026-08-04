@@ -29,6 +29,16 @@ void nv2a_release_framebuffer_surface(void);
 /* VK display info for libretro VK HW render interface.
  * Only valid while framebuffer is in use (between get/release calls). */
 void nv2a_get_vk_display_info(void **out_handle, int *out_width, int *out_height);
+
+/* Export a fresh POSIX file descriptor for the Vulkan display image's
+ * memory. Each call returns a new descriptor and transfers ownership to the
+ * caller - importing one into another device consumes it - so ask for one
+ * only when an import is actually about to happen. Returns -1 on failure. */
+int nv2a_vk_export_display_fd(void);
+
+/* Tiling the Vulkan display image was created with. An importer on another
+ * device must create its image with the same tiling. */
+bool nv2a_vk_display_uses_optimal_tiling(void);
 /* Non-blocking: trigger PFIFO to render display image, returns immediately.
  * The display image will be updated asynchronously by the PFIFO thread. */
 void nv2a_trigger_display_render(void);

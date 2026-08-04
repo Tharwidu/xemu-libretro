@@ -213,6 +213,44 @@ static int pgraph_vk_get_framebuffer_surface(NV2AState *d)
 }
 
 #ifdef LIBRETRO
+bool nv2a_vk_display_uses_optimal_tiling(void)
+{
+    NV2AState *d = g_nv2a;
+    if (!d) {
+        return true;
+    }
+    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
+    return r ? r->display.optimal_tiling : true;
+}
+
+#ifndef WIN32
+int nv2a_vk_export_display_fd(void)
+{
+    NV2AState *d = g_nv2a;
+    if (!d) {
+        return -1;
+    }
+    PGRAPHState *pg = &d->pgraph;
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    if (!r || r->display.memory == VK_NULL_HANDLE) {
+        return -1;
+    }
+
+    /* A second descriptor for the same allocation: the one taken at display
+     * creation was handed to glImportMemoryFdEXT, which owns it now. */
+    VkMemoryGetFdInfoKHR fd_info = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR,
+        .memory = r->display.memory,
+        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
+    };
+    int fd = -1;
+    if (vkGetMemoryFdKHR(r->device, &fd_info, &fd) != VK_SUCCESS) {
+        return -1;
+    }
+    return fd;
+}
+#endif /* !WIN32 */
+
 void nv2a_get_vk_display_info(void **out_handle, int *out_width, int *out_height)
 {
     NV2AState *d = g_nv2a;

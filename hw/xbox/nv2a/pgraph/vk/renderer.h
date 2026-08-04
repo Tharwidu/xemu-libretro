@@ -286,6 +286,10 @@ typedef struct PGRAPHVkDisplayState {
     int width, height;
     int draw_time;
 
+    /* Tiling the display image was actually created with. An importer on
+     * another device must match it; guessing is undefined behaviour. */
+    bool optimal_tiling;
+
     // OpenGL Interop
 #ifdef WIN32
     HANDLE handle;

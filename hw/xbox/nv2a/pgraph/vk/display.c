@@ -724,6 +724,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
 
     d->width = image_create_info.extent.width;
     d->height = image_create_info.extent.height;
+    d->optimal_tiling = use_optimal_tiling;
 
     create_frame_buffer(pg);
 }
