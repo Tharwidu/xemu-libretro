@@ -49,6 +49,7 @@ bool nv2a_vk_get_display_frame(uint32_t *dst, int dst_cap_pixels,
 /* Cost of the Vulkan GPU->CPU display copy since the last call, measured on
  * the emulation thread. Resets on read. */
 void nv2a_vk_get_capture_stats(uint64_t *out_us, unsigned *out_count);
+void nv2a_gl_get_capture_stats(uint64_t *out_us, unsigned *out_count);
 /* Non-blocking: trigger PFIFO to render display image, returns immediately.
  * The display image will be updated asynchronously by the PFIFO thread. */
 void nv2a_trigger_display_render(void);

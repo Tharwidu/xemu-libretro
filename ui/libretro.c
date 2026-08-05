@@ -297,6 +297,8 @@ static void stats_report_if_due(void)
     unsigned vkcopy_n = 0;
     if (use_vulkan) {
         nv2a_vk_get_capture_stats(&vkcopy_us, &vkcopy_n);
+    } else {
+        nv2a_gl_get_capture_stats(&vkcopy_us, &vkcopy_n);
     }
 
     LRLOG_INFO("[xemu] stats: %.1f fps (%u frames/%.1fs) | delivered %u "

@@ -61,6 +61,10 @@ static struct {
     uint32_t *pixels;   /* rows bottom-up, as glReadPixels produces them */
     int width, height;
     int cap_pixels;
+    uint32_t *scratch;      /* written by the emulation thread, unguarded */
+    int scratch_pixels;
+    uint64_t copy_us;
+    unsigned copy_count;
     bool has_frame;
     /* Async transfer: glReadPixels goes into a PBO (returns without
      * draining the GPU); the previous frame's PBO is mapped and copied out
@@ -78,6 +82,21 @@ void nv2a_gl_display_readback_set_enabled(bool enable)
         disp_readback.inited = true;
     }
     disp_readback.enabled = enable;
+}
+
+void nv2a_gl_get_capture_stats(uint64_t *out_us, unsigned *out_count)
+{
+    if (!disp_readback.inited) {
+        *out_us = 0;
+        *out_count = 0;
+        return;
+    }
+    qemu_mutex_lock(&disp_readback.lock);
+    *out_us = disp_readback.copy_us;
+    *out_count = disp_readback.copy_count;
+    disp_readback.copy_us = 0;
+    disp_readback.copy_count = 0;
+    qemu_mutex_unlock(&disp_readback.lock);
 }
 
 bool nv2a_gl_get_display_frame(uint32_t *dst, int dst_cap_pixels,
@@ -144,20 +163,38 @@ static void capture_display_frame(NV2AState *d)
             GL_PIXEL_PACK_BUFFER, 0, (size_t)pw * ph * sizeof(uint32_t),
             GL_MAP_READ_BIT);
         if (src) {
-            qemu_mutex_lock(&disp_readback.lock);
-            if (disp_readback.cap_pixels < pw * ph) {
+            const int64_t t0 = g_get_monotonic_time();
+            /* Copy out of the mapped PBO without the lock held. Doing this
+             * inside it made every frontend fetch wait on the emulation
+             * thread for a full-frame copy out of driver memory - the same
+             * contention that cost the Vulkan path most of its frame rate. */
+            if (disp_readback.scratch_pixels < pw * ph) {
+                qemu_mutex_lock(&disp_readback.lock);
+                g_free(disp_readback.scratch);
+                g_free(disp_readback.pixels);
+                disp_readback.scratch =
+                    g_malloc((size_t)pw * ph * sizeof(uint32_t));
                 disp_readback.pixels =
-                    g_realloc(disp_readback.pixels,
-                              (size_t)pw * ph * sizeof(uint32_t));
+                    g_malloc((size_t)pw * ph * sizeof(uint32_t));
+                disp_readback.scratch_pixels = pw * ph;
                 disp_readback.cap_pixels = pw * ph;
+                disp_readback.has_frame = false;
+                qemu_mutex_unlock(&disp_readback.lock);
             }
-            memcpy(disp_readback.pixels, src,
+            memcpy(disp_readback.scratch, src,
                    (size_t)pw * ph * sizeof(uint32_t));
+            glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+
+            qemu_mutex_lock(&disp_readback.lock);
+            uint32_t *previous = disp_readback.pixels;
+            disp_readback.pixels = disp_readback.scratch;
+            disp_readback.scratch = previous;
             disp_readback.width = pw;
             disp_readback.height = ph;
             disp_readback.has_frame = true;
+            disp_readback.copy_us += (uint64_t)(g_get_monotonic_time() - t0);
+            disp_readback.copy_count++;
             qemu_mutex_unlock(&disp_readback.lock);
-            glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
         }
     }
     glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
