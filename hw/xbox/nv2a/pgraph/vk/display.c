@@ -1159,7 +1159,14 @@ void nv2a_vk_display_readback_set_enabled(bool enable)
  * the GL contexts are what contend with the frontend's own. */
 bool pgraph_vk_gl_interop_enabled(void)
 {
-    return !vk_readback.enabled;
+    /* XEMU_VK_FORCE_INTEROP keeps the GL interop alive even in readback
+     * mode, so the cost of dropping it can be measured separately from
+     * the cost of the readback itself. Diagnostic only. */
+    static int forced = -1;
+    if (forced < 0) {
+        forced = getenv("XEMU_VK_FORCE_INTEROP") ? 1 : 0;
+    }
+    return forced || !vk_readback.enabled;
 }
 
 bool nv2a_vk_get_display_frame(uint32_t *dst, int dst_cap_pixels,
@@ -1407,6 +1414,10 @@ static void capture_display_frame_vk(PGRAPHState *pg)
         return;
     }
 
+    /* Time from here: the fence wait below was previously outside the
+     * measured region, which is exactly where a stall would hide. */
+    const int64_t copy_start_us = g_get_monotonic_time();
+
     /* Collect the copy submitted last frame before reusing the buffers.
      * By now it has had a whole frame to finish, so this rarely blocks -
      * unlike waiting on our own submission, which is what made this cost
@@ -1419,8 +1430,6 @@ static void capture_display_frame_vk(PGRAPHState *pg)
     if (!ensure_readback_buffer(pg, size)) {
         return;
     }
-
-    const int64_t copy_start_us = g_get_monotonic_time();
 
     vkResetCommandBuffer(vk_readback.cmd, 0);
     VkCommandBufferBeginInfo begin_info = {
