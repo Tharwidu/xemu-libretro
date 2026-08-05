@@ -18,6 +18,15 @@
  */
 
 #include "renderer.h"
+
+#ifndef LIBRETRO
+/* Standalone always presents through the GL interop texture; only the
+ * libretro core's CPU-readback path has no consumer for it. */
+bool pgraph_vk_gl_interop_enabled(void)
+{
+    return true;
+}
+#endif
 #include <math.h>
 
 static uint8_t *convert_texture_data__CR8YB8CB8YA8(uint8_t *data_out,
