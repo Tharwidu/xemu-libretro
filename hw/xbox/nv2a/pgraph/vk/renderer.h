@@ -43,6 +43,10 @@
 
 #define HAVE_EXTERNAL_MEMORY 1
 
+/* False when frames leave over a CPU readback and the GL interop texture
+ * has no consumer, letting the Vulkan renderer run with no GL context. */
+bool pgraph_vk_gl_interop_enabled(void);
+
 typedef struct QueueFamilyIndices {
     int queue_family;
 } QueueFamilyIndices;

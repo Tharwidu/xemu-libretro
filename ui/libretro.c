@@ -257,7 +257,7 @@ static uint32_t readback_frame[READBACK_MAX_W * READBACK_MAX_H];
  * slow", "it stuttered") has been unattributable because the log said
  * nothing about what the core was doing.
  * ------------------------------------------------------------------ */
-#define STATS_INTERVAL_FRAMES 600
+#define STATS_INTERVAL_US (10 * 1000 * 1000) /* 10 s */
 
 static struct {
     int64_t window_start_us;   /* when this window opened */
@@ -272,7 +272,7 @@ static struct {
     unsigned audio_frames;     /* audio frames pushed to the frontend */
 } stats;
 
-static void stats_report(void)
+static void stats_report_if_due(void)
 {
     int64_t now = g_get_monotonic_time();
     if (stats.window_start_us == 0) {
@@ -284,20 +284,32 @@ static void stats_report(void)
         return;
     }
 
+    if (now - stats.window_start_us < STATS_INTERVAL_US) {
+        return;
+    }
+
     double secs = (double)(now - stats.window_start_us) / 1e6;
     if (secs <= 0.0) {
         secs = 1.0;
     }
 
+    uint64_t vkcopy_us = 0;
+    unsigned vkcopy_n = 0;
+    if (use_vulkan) {
+        nv2a_vk_get_capture_stats(&vkcopy_us, &vkcopy_n);
+    }
+
     LRLOG_INFO("[xemu] stats: %.1f fps (%u frames/%.1fs) | delivered %u "
                "dup %u black %u | src pgraph %u vga %u vk %u | capture "
-               "%.2f ms/f | pace %.2f ms/f | ff %u | audio %u frames "
-               "(%.0f/s)\n",
+               "%.2f ms/f | gpucopy %.2f ms x%u | pace %.2f ms/f | ff %u "
+               "| audio %u frames (%.0f/s)\n",
                stats.frames / secs, stats.frames, secs,
                stats.delivered, stats.duped, stats.black,
                stats.src_pgraph, stats.src_vga, stats.src_vk,
                stats.frames ? (double)stats.capture_us / stats.frames / 1000.0
                             : 0.0,
+               vkcopy_n ? (double)vkcopy_us / vkcopy_n / 1000.0 : 0.0,
+               vkcopy_n,
                stats.frames ? (double)stats.pace_sleep_us / stats.frames / 1000.0
                             : 0.0,
                stats.ff_frames, stats.audio_frames,
@@ -2188,9 +2200,9 @@ RETRO_API void retro_run(void)
     run_count++;
 
     stats.frames++;
-    if ((run_count % STATS_INTERVAL_FRAMES) == 0) {
-        stats_report();
-    }
+    /* Time-based, not frame-based: a frame counter goes quiet exactly when
+     * the core is slow, which is when the line is most wanted. */
+    stats_report_if_due();
     qatomic_set(&last_retro_run_us, g_get_monotonic_time());
     if (xemu_debug_logs() && (run_count <= 5 || (run_count % 300) == 0)) {
         LRLOG_INFO("[xemu] retro_run #%d (emu_init=%d ctx_ready=%d game=%d)\n",

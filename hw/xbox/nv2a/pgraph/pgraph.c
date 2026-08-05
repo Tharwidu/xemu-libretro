@@ -284,6 +284,16 @@ void nv2a_context_init(void)
         if (!r) {
             continue;
         }
+#ifdef LIBRETRO
+        /* The FIXME above does not apply to the libretro core: the renderer
+         * is fixed when content loads and changing it requires a restart,
+         * so there is no runtime switch to keep contexts warm for. Setting
+         * up only the one we will use is what stops a Vulkan core creating
+         * OpenGL contexts it never draws with. */
+        if (i != (int)g_config.display.renderer) {
+            continue;
+        }
+#endif
         if (r->ops.early_context_init) {
             r->ops.early_context_init();
         }

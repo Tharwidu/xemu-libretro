@@ -29,7 +29,9 @@ static GloContext *g_gl_context;
 static void early_context_init(void)
 {
 #if HAVE_EXTERNAL_MEMORY
-    g_gl_context = glo_context_create();
+    if (pgraph_vk_gl_interop_enabled()) {
+        g_gl_context = glo_context_create();
+    }
 #endif
 }
 
@@ -40,7 +42,9 @@ static void pgraph_vk_init(NV2AState *d, Error **errp)
     pg->vk_renderer_state = (PGRAPHVkState *)g_malloc0(sizeof(PGRAPHVkState));
 
 #if HAVE_EXTERNAL_MEMORY
-    glo_set_current(g_gl_context);
+    if (pgraph_vk_gl_interop_enabled()) {
+        glo_set_current(g_gl_context);
+    }
 #endif
 
     pgraph_vk_debug_init();
@@ -109,7 +113,9 @@ static void pgraph_vk_sync(NV2AState *d)
     PGRAPHState *pg = &d->pgraph;
 #if HAVE_EXTERNAL_MEMORY
     /* Ensure PFIFO thread's GL context is current for GL interop in render_display */
-    glo_set_current(g_gl_context);
+    if (pgraph_vk_gl_interop_enabled()) {
+        glo_set_current(g_gl_context);
+    }
 #endif
     pgraph_vk_render_display(pg);
 
