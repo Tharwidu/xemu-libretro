@@ -444,6 +444,38 @@ static void render_display_pvideo_overlay(NV2AState *d)
                 scale_x, scale_y, 1.0f / pg->surface_scale_factor);
 }
 
+/* See the matching counter in pgraph/vk/display.c: same metric in both
+ * renderers so standalone and libretro numbers are comparable. */
+static void perf_count_display_render(const char *renderer)
+{
+    static bool checked, enabled;
+    static int64_t window_start_us;
+    static unsigned count;
+
+    if (!checked) {
+        enabled = getenv("XEMU_PERF") != NULL;
+        checked = true;
+    }
+    if (!enabled) {
+        return;
+    }
+
+    int64_t now = g_get_monotonic_time();
+    count++;
+    if (window_start_us == 0) {
+        window_start_us = now;
+        count = 0;
+        return;
+    }
+    if (now - window_start_us >= 5 * 1000 * 1000) {
+        double secs = (double)(now - window_start_us) / 1e6;
+        fprintf(stderr, "[xemu-perf] %s: %.1f display renders/s (%u in %.1fs)\n",
+                renderer, count / secs, count, secs);
+        window_start_us = now;
+        count = 0;
+    }
+}
+
 static void render_display(NV2AState *d, SurfaceBinding *surface)
 {
     struct PGRAPHState *pg = &d->pgraph;
@@ -589,6 +621,7 @@ void pgraph_gl_sync(NV2AState *d)
 
     /* Render framebuffer in display context */
     glo_set_current(g_nv2a_context_display);
+    perf_count_display_render("opengl");
     render_display(d, surface);
     gl_fence();
     display_drain_gl_errors("pgraph_gl_sync/render_display");

@@ -1463,8 +1463,42 @@ static void capture_display_frame_vk(PGRAPHState *pg)
 }
 #endif /* LIBRETRO */
 
+/* Display renders completed per second, counted in shared renderer code so
+ * the standalone binary and the libretro core report the same number and
+ * can be compared directly. Enable with XEMU_PERF=1. */
+static void perf_count_display_render(const char *renderer)
+{
+    static bool checked, enabled;
+    static int64_t window_start_us;
+    static unsigned count;
+
+    if (!checked) {
+        enabled = getenv("XEMU_PERF") != NULL;
+        checked = true;
+    }
+    if (!enabled) {
+        return;
+    }
+
+    int64_t now = g_get_monotonic_time();
+    count++;
+    if (window_start_us == 0) {
+        window_start_us = now;
+        count = 0;
+        return;
+    }
+    if (now - window_start_us >= 5 * 1000 * 1000) {
+        double secs = (double)(now - window_start_us) / 1e6;
+        fprintf(stderr, "[xemu-perf] %s: %.1f display renders/s (%u in %.1fs)\n",
+                renderer, count / secs, count, secs);
+        window_start_us = now;
+        count = 0;
+    }
+}
+
 void pgraph_vk_render_display(PGRAPHState *pg)
 {
+    perf_count_display_render("vulkan");
     NV2AState *d = container_of(pg, NV2AState, pgraph);
     PGRAPHVkState *r = pg->vk_renderer_state;
 
