@@ -918,6 +918,11 @@ static void update_uniforms(PGRAPHState *pg, SurfaceBinding *surface)
     }
 }
 
+#ifdef LIBRETRO
+static void capture_record_copy(PGRAPHState *pg, VkCommandBuffer cmd);
+static void capture_publish_copy(PGRAPHState *pg);
+#endif
+
 static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
 {
     NV2AState *d = container_of(pg, NV2AState, pgraph);
@@ -1017,9 +1022,22 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
+#ifdef LIBRETRO
+    /* Record the readback into the buffer that is about to be submitted
+     * anyway. A submit of our own cost ~45 ms a frame in stalls even when
+     * asynchronous, for a 1.2 MB transfer - the extra sync point was the
+     * expense, not the copy. */
+    capture_record_copy(pg, cmd);
+#endif
+
     pgraph_vk_end_debug_marker(r, cmd);
     pgraph_vk_end_single_time_commands(pg, cmd);
     nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_5);
+
+#ifdef LIBRETRO
+    /* That submit waits for the queue, so the copy has landed by here. */
+    capture_publish_copy(pg);
+#endif
 
     disp->draw_time = surface->draw_time;
 }
@@ -1066,14 +1084,12 @@ void pgraph_vk_init_display(PGRAPHState *pg)
 }
 
 #ifdef LIBRETRO
-static void destroy_readback_sync(PGRAPHState *pg);
 static void destroy_readback_buffer(PGRAPHState *pg);
 #endif
 
 void pgraph_vk_finalize_display(PGRAPHState *pg)
 {
 #ifdef LIBRETRO
-    destroy_readback_sync(pg);
     destroy_readback_buffer(pg);
 #endif
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -1121,9 +1137,7 @@ static struct {
     unsigned copy_count;
     /* Async copy: our own command buffer and fence, so the copy is not
      * serialised behind a full queue drain. */
-    VkCommandBuffer cmd;
-    VkFence fence;
-    bool submit_outstanding;
+    bool pending;
     int pending_w, pending_h;
 } vk_readback;
 
@@ -1205,109 +1219,6 @@ static void destroy_readback_buffer(PGRAPHState *pg)
     vk_readback.buffer_size = 0;
 }
 
-static void destroy_readback_sync(PGRAPHState *pg)
-{
-    PGRAPHVkState *r = pg->vk_renderer_state;
-    if (vk_readback.fence != VK_NULL_HANDLE) {
-        vkDestroyFence(r->device, vk_readback.fence, NULL);
-        vk_readback.fence = VK_NULL_HANDLE;
-    }
-    if (vk_readback.cmd != VK_NULL_HANDLE) {
-        vkFreeCommandBuffers(r->device, r->command_pool, 1, &vk_readback.cmd);
-        vk_readback.cmd = VK_NULL_HANDLE;
-    }
-    vk_readback.submit_outstanding = false;
-}
-
-static bool ensure_readback_sync(PGRAPHState *pg)
-{
-    PGRAPHVkState *r = pg->vk_renderer_state;
-
-    if (vk_readback.cmd != VK_NULL_HANDLE) {
-        return true;
-    }
-
-    VkCommandBufferAllocateInfo alloc = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .commandPool = r->command_pool,
-        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = 1,
-    };
-    if (vkAllocateCommandBuffers(r->device, &alloc, &vk_readback.cmd) !=
-        VK_SUCCESS) {
-        vk_readback.cmd = VK_NULL_HANDLE;
-        return false;
-    }
-
-    VkFenceCreateInfo fence_ci = {
-        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-    };
-    if (vkCreateFence(r->device, &fence_ci, NULL, &vk_readback.fence) !=
-        VK_SUCCESS) {
-        vkFreeCommandBuffers(r->device, r->command_pool, 1, &vk_readback.cmd);
-        vk_readback.cmd = VK_NULL_HANDLE;
-        vk_readback.fence = VK_NULL_HANDLE;
-        return false;
-    }
-    return true;
-}
-
-/* Take the frame from the copy submitted last time round. */
-static void publish_pending_frame(PGRAPHState *pg)
-{
-    PGRAPHVkState *r = pg->vk_renderer_state;
-    const int w = vk_readback.pending_w, h = vk_readback.pending_h;
-
-    if (vkWaitForFences(r->device, 1, &vk_readback.fence, VK_TRUE,
-                        UINT64_MAX) != VK_SUCCESS) {
-        return;
-    }
-    vkResetFences(r->device, 1, &vk_readback.fence);
-
-    void *mapped = NULL;
-    if (vkMapMemory(r->device, vk_readback.memory, 0,
-                    (VkDeviceSize)w * h * 4, 0, &mapped) != VK_SUCCESS) {
-        return;
-    }
-
-    /* Convert outside the lock. Holding it across a 300k-pixel swizzle
-     * made every frontend fetch wait on the emulation thread - visible as
-     * a 10-17 ms "capture" cost and starved audio. */
-    /* Both buffers are kept the same size so the swap below only has to
-     * move pointers - swapping capacities as well is how the first attempt
-     * ended up writing into a NULL buffer. */
-    const size_t npix = (size_t)w * h;
-    if (vk_readback.scratch_pixels < npix) {
-        qemu_mutex_lock(&vk_readback.lock);
-        g_free(vk_readback.scratch);
-        g_free(vk_readback.pixels);
-        vk_readback.scratch = g_malloc(npix * sizeof(uint32_t));
-        vk_readback.pixels = g_malloc(npix * sizeof(uint32_t));
-        vk_readback.scratch_pixels = npix;
-        vk_readback.has_frame = false;
-        qemu_mutex_unlock(&vk_readback.lock);
-    }
-
-    /* R8G8B8A8_UNORM is bytes R,G,B,A; XRGB8888 wants 0x00RRGGBB. */
-    const uint8_t *src = mapped;
-    uint32_t *out = vk_readback.scratch;
-    for (size_t i = 0; i < npix; i++, src += 4) {
-        out[i] = ((uint32_t)src[0] << 16) | ((uint32_t)src[1] << 8) |
-                 (uint32_t)src[2];
-    }
-    vkUnmapMemory(r->device, vk_readback.memory);
-
-    /* Swap the finished buffer in; the lock is held only for pointers. */
-    qemu_mutex_lock(&vk_readback.lock);
-    uint32_t *previous = vk_readback.pixels;
-    vk_readback.pixels = vk_readback.scratch;
-    vk_readback.scratch = previous;
-    vk_readback.width = w;
-    vk_readback.height = h;
-    vk_readback.has_frame = true;
-    qemu_mutex_unlock(&vk_readback.lock);
-}
-
 static bool ensure_readback_buffer(PGRAPHState *pg, VkDeviceSize size)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -1336,10 +1247,15 @@ static bool ensure_readback_buffer(PGRAPHState *pg, VkDeviceSize size)
     VkMemoryAllocateInfo alloc_info = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .allocationSize = reqs.size,
+        /* HOST_CACHED matters more than it looks: the CPU reads every
+         * pixel back out of here, and reading uncached/write-combined
+         * memory a word at a time is orders of magnitude slower than
+         * cached. Without it this loop cost ~55 ms a frame. */
         .memoryTypeIndex = pgraph_vk_get_memory_type(
             pg, reqs.memoryTypeBits,
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+            VK_MEMORY_PROPERTY_HOST_CACHED_BIT),
     };
     if (vkAllocateMemory(r->device, &alloc_info, NULL, &vk_readback.memory) !=
         VK_SUCCESS) {
@@ -1391,94 +1307,6 @@ static void readback_transition(VkCommandBuffer cmd, VkImage image,
     vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, NULL, 0, NULL, 1,
                          &barrier);
 }
-
-/* PFIFO thread. The display image is left in SHADER_READ_ONLY_OPTIMAL by
- * render_display(); borrow it for the copy and hand it back in the same
- * layout. */
-static void capture_display_frame_vk(PGRAPHState *pg)
-{
-    PGRAPHVkState *r = pg->vk_renderer_state;
-    PGRAPHVkDisplayState *disp = &r->display;
-
-    if (!vk_readback.inited || !vk_readback.enabled) {
-        return;
-    }
-    if (disp->image == VK_NULL_HANDLE || !disp->width || !disp->height) {
-        return;
-    }
-
-    const int w = disp->width, h = disp->height;
-    const VkDeviceSize size = (VkDeviceSize)w * h * 4;
-
-    if (!ensure_readback_sync(pg)) {
-        return;
-    }
-
-    /* Time from here: the fence wait below was previously outside the
-     * measured region, which is exactly where a stall would hide. */
-    const int64_t copy_start_us = g_get_monotonic_time();
-
-    /* Collect the copy submitted last frame before reusing the buffers.
-     * By now it has had a whole frame to finish, so this rarely blocks -
-     * unlike waiting on our own submission, which is what made this cost
-     * 55 ms a frame. */
-    if (vk_readback.submit_outstanding) {
-        publish_pending_frame(pg);
-        vk_readback.submit_outstanding = false;
-    }
-
-    if (!ensure_readback_buffer(pg, size)) {
-        return;
-    }
-
-    vkResetCommandBuffer(vk_readback.cmd, 0);
-    VkCommandBufferBeginInfo begin_info = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-    };
-    if (vkBeginCommandBuffer(vk_readback.cmd, &begin_info) != VK_SUCCESS) {
-        return;
-    }
-
-    readback_transition(vk_readback.cmd, disp->image, true);
-
-    VkBufferImageCopy region = {
-        .imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-        .imageSubresource.layerCount = 1,
-        .imageExtent = { w, h, 1 },
-    };
-    vkCmdCopyImageToBuffer(vk_readback.cmd, disp->image,
-                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           vk_readback.buffer, 1, &region);
-
-    readback_transition(vk_readback.cmd, disp->image, false);
-
-    if (vkEndCommandBuffer(vk_readback.cmd) != VK_SUCCESS) {
-        return;
-    }
-
-    /* Submitted without waiting. Work on one queue runs in order, so this
-     * copy completes before the next frame's rendering touches the image;
-     * the fence only gates when the CPU may read the staging buffer. */
-    VkSubmitInfo submit_info = {
-        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .commandBufferCount = 1,
-        .pCommandBuffers = &vk_readback.cmd,
-    };
-    if (vkQueueSubmit(r->queue, 1, &submit_info, vk_readback.fence) !=
-        VK_SUCCESS) {
-        return;
-    }
-    vk_readback.submit_outstanding = true;
-    vk_readback.pending_w = w;
-    vk_readback.pending_h = h;
-
-    qemu_mutex_lock(&vk_readback.lock);
-    vk_readback.copy_us +=
-        (uint64_t)(g_get_monotonic_time() - copy_start_us);
-    vk_readback.copy_count++;
-    qemu_mutex_unlock(&vk_readback.lock);
-}
 #endif /* LIBRETRO */
 
 /* Display renders completed per second, counted in shared renderer code so
@@ -1512,6 +1340,94 @@ static void perf_count_display_render(const char *renderer)
         window_start_us = now;
         count = 0;
     }
+}
+
+static void capture_record_copy(PGRAPHState *pg, VkCommandBuffer cmd)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    PGRAPHVkDisplayState *disp = &r->display;
+
+    vk_readback.pending = false;
+
+    if (!vk_readback.inited || !vk_readback.enabled) {
+        return;
+    }
+    if (disp->image == VK_NULL_HANDLE || !disp->width || !disp->height) {
+        return;
+    }
+
+    const int w = disp->width, h = disp->height;
+    if (!ensure_readback_buffer(pg, (VkDeviceSize)w * h * 4)) {
+        return;
+    }
+
+    readback_transition(cmd, disp->image, true);
+
+    VkBufferImageCopy region = {
+        .imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .imageSubresource.layerCount = 1,
+        .imageExtent = { w, h, 1 },
+    };
+    vkCmdCopyImageToBuffer(cmd, disp->image,
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           vk_readback.buffer, 1, &region);
+
+    readback_transition(cmd, disp->image, false);
+
+    vk_readback.pending = true;
+    vk_readback.pending_w = w;
+    vk_readback.pending_h = h;
+}
+
+static void capture_publish_copy(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    if (!vk_readback.pending) {
+        return;
+    }
+    vk_readback.pending = false;
+
+    const int w = vk_readback.pending_w, h = vk_readback.pending_h;
+    const int64_t t0 = g_get_monotonic_time();
+
+    void *mapped = NULL;
+    if (vkMapMemory(r->device, vk_readback.memory, 0,
+                    (VkDeviceSize)w * h * 4, 0, &mapped) != VK_SUCCESS) {
+        return;
+    }
+
+    const size_t npix = (size_t)w * h;
+    if (vk_readback.scratch_pixels < npix) {
+        qemu_mutex_lock(&vk_readback.lock);
+        g_free(vk_readback.scratch);
+        g_free(vk_readback.pixels);
+        vk_readback.scratch = g_malloc(npix * sizeof(uint32_t));
+        vk_readback.pixels = g_malloc(npix * sizeof(uint32_t));
+        vk_readback.scratch_pixels = npix;
+        vk_readback.has_frame = false;
+        qemu_mutex_unlock(&vk_readback.lock);
+    }
+
+    /* R8G8B8A8_UNORM is bytes R,G,B,A; XRGB8888 wants 0x00RRGGBB. */
+    const uint8_t *src = mapped;
+    uint32_t *out = vk_readback.scratch;
+    for (size_t i = 0; i < npix; i++, src += 4) {
+        out[i] = ((uint32_t)src[0] << 16) | ((uint32_t)src[1] << 8) |
+                 (uint32_t)src[2];
+    }
+    vkUnmapMemory(r->device, vk_readback.memory);
+
+    qemu_mutex_lock(&vk_readback.lock);
+    uint32_t *previous = vk_readback.pixels;
+    vk_readback.pixels = vk_readback.scratch;
+    vk_readback.scratch = previous;
+    vk_readback.width = w;
+    vk_readback.height = h;
+    vk_readback.has_frame = true;
+    vk_readback.copy_us += (uint64_t)(g_get_monotonic_time() - t0);
+    vk_readback.copy_count++;
+    qemu_mutex_unlock(&vk_readback.lock);
 }
 
 void pgraph_vk_render_display(PGRAPHState *pg)
@@ -1548,6 +1464,5 @@ void pgraph_vk_render_display(PGRAPHState *pg)
     render_display(pg, surface);
 
 #ifdef LIBRETRO
-    capture_display_frame_vk(pg);
 #endif
 }
