@@ -131,3 +131,30 @@ void pgraph_vk_end_debug_marker(PGRAPHVkState *r, VkCommandBuffer cmd)
     assert(r->debug_depth > 0);
     r->debug_depth -= 1;
 }
+
+#ifdef LIBRETRO
+/* Rate-limited so a per-frame failure cannot flood the frontend's log and
+ * turn a rendering problem into a disk-space one. */
+void pgraph_vk_report_result(const char *file, int line, const char *expr,
+                             int result)
+{
+    static const char *last_file;
+    static int last_line;
+    static unsigned repeats;
+
+    if (file == last_file && line == last_line) {
+        if (++repeats % 600) {
+            return;
+        }
+        fprintf(stderr, "[nv2a-vk] %s:%d still failing (%u times): %s = %d\n",
+                file, line, repeats, expr, result);
+        return;
+    }
+
+    last_file = file;
+    last_line = line;
+    repeats = 0;
+    fprintf(stderr, "[nv2a-vk] %s:%d tolerated failure: %s = %d\n",
+            file, line, expr, result);
+}
+#endif

@@ -46,6 +46,25 @@ extern int nv2a_vk_dgroup_indent;
         assert(nv2a_vk_dgroup_indent >= 0); \
     } while (0)
 
+#ifdef LIBRETRO
+/* A libretro core runs inside the frontend's process, so an assert here
+ * does not stop the emulator - it kills RetroArch. Report and carry on
+ * instead, the same trade the OpenGL renderer already makes for its error
+ * and framebuffer checks, which wine and Proton trip on benign conditions.
+ * Continuing is not always recoverable, but aborting never is, and today
+ * any non-success result at all takes the frontend down with it. */
+void pgraph_vk_report_result(const char *file, int line, const char *expr,
+                             int result);
+
+#define VK_CHECK(x)                                                     \
+    do {                                                                \
+        VkResult vk_result = (x);                                       \
+        if (vk_result != VK_SUCCESS) {                                  \
+            pgraph_vk_report_result(__FILE__, __LINE__, #x,             \
+                                    (int)vk_result);                    \
+        }                                                               \
+    } while (0)
+#else
 #define VK_CHECK(x)                                           \
     do {                                                      \
         VkResult vk_result = (x);                             \
@@ -54,6 +73,7 @@ extern int nv2a_vk_dgroup_indent;
         }                                                     \
         assert(vk_result == VK_SUCCESS && "vk check failed"); \
     } while (0)
+#endif
 
 void pgraph_vk_debug_frame_terminator(void);
 
