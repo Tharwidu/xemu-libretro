@@ -2388,8 +2388,19 @@ RETRO_API void retro_run(void)
          * capture holds exactly the frame the HW path would blit. */
         int pg_tex = 0;
         if (emu_initialized) {
-            pg_tex = nv2a_get_framebuffer_surface();
-            nv2a_release_framebuffer_surface();
+            if (use_vulkan) {
+                /* Ask for a render and move on. The blocking form below
+                 * forces a full display pass per retro_run, and upstream's
+                 * Vulkan render_display ends in a queue drain - driving
+                 * that synchronously at 60 Hz serialises the renderer and
+                 * costs about 5x the frame rate. The capture publishes
+                 * whatever the emulation thread last finished, which is
+                 * how the OpenGL PBO path already behaves. */
+                nv2a_trigger_display_render();
+            } else {
+                pg_tex = nv2a_get_framebuffer_surface();
+                nv2a_release_framebuffer_surface();
+            }
         }
 
         int w = 0, h = 0;

@@ -1098,7 +1098,9 @@ static struct {
     bool enabled;
     bool has_frame;
     QemuMutex lock;
-    uint32_t *pixels;
+    uint32_t *pixels;   /* published frame, guarded by lock */
+    uint32_t *scratch;  /* written by the emulation thread, unguarded */
+    size_t scratch_pixels;
     int width, height;
     VkBuffer buffer;
     VkDeviceMemory memory;
@@ -1252,26 +1254,42 @@ static void publish_pending_frame(PGRAPHState *pg)
         return;
     }
 
-    qemu_mutex_lock(&vk_readback.lock);
-    if (vk_readback.width != w || vk_readback.height != h ||
-        vk_readback.pixels == NULL) {
+    /* Convert outside the lock. Holding it across a 300k-pixel swizzle
+     * made every frontend fetch wait on the emulation thread - visible as
+     * a 10-17 ms "capture" cost and starved audio. */
+    /* Both buffers are kept the same size so the swap below only has to
+     * move pointers - swapping capacities as well is how the first attempt
+     * ended up writing into a NULL buffer. */
+    const size_t npix = (size_t)w * h;
+    if (vk_readback.scratch_pixels < npix) {
+        qemu_mutex_lock(&vk_readback.lock);
+        g_free(vk_readback.scratch);
         g_free(vk_readback.pixels);
-        vk_readback.pixels = g_malloc((size_t)w * h * sizeof(uint32_t));
-        vk_readback.width = w;
-        vk_readback.height = h;
+        vk_readback.scratch = g_malloc(npix * sizeof(uint32_t));
+        vk_readback.pixels = g_malloc(npix * sizeof(uint32_t));
+        vk_readback.scratch_pixels = npix;
+        vk_readback.has_frame = false;
+        qemu_mutex_unlock(&vk_readback.lock);
     }
 
     /* R8G8B8A8_UNORM is bytes R,G,B,A; XRGB8888 wants 0x00RRGGBB. */
     const uint8_t *src = mapped;
-    uint32_t *out = vk_readback.pixels;
-    for (size_t i = 0, n = (size_t)w * h; i < n; i++, src += 4) {
+    uint32_t *out = vk_readback.scratch;
+    for (size_t i = 0; i < npix; i++, src += 4) {
         out[i] = ((uint32_t)src[0] << 16) | ((uint32_t)src[1] << 8) |
                  (uint32_t)src[2];
     }
+    vkUnmapMemory(r->device, vk_readback.memory);
+
+    /* Swap the finished buffer in; the lock is held only for pointers. */
+    qemu_mutex_lock(&vk_readback.lock);
+    uint32_t *previous = vk_readback.pixels;
+    vk_readback.pixels = vk_readback.scratch;
+    vk_readback.scratch = previous;
+    vk_readback.width = w;
+    vk_readback.height = h;
     vk_readback.has_frame = true;
     qemu_mutex_unlock(&vk_readback.lock);
-
-    vkUnmapMemory(r->device, vk_readback.memory);
 }
 
 static bool ensure_readback_buffer(PGRAPHState *pg, VkDeviceSize size)
