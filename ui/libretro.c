@@ -301,15 +301,15 @@ static void stats_report_if_due(void)
 
     LRLOG_INFO("[xemu] stats: %.1f fps (%u frames/%.1fs) | delivered %u "
                "dup %u black %u | src pgraph %u vga %u vk %u | capture "
-               "%.2f ms/f | gpucopy %.2f ms x%u | pace %.2f ms/f | ff %u "
-               "| audio %u frames (%.0f/s)\n",
+               "%.2f ms/f | guest %.1f/s (%u new) | gpucopy %.2f ms | "
+               "pace %.2f ms/f | ff %u | audio %u frames (%.0f/s)\n",
                stats.frames / secs, stats.frames, secs,
                stats.delivered, stats.duped, stats.black,
                stats.src_pgraph, stats.src_vga, stats.src_vk,
                stats.frames ? (double)stats.capture_us / stats.frames / 1000.0
                             : 0.0,
+               vkcopy_n / secs, vkcopy_n,
                vkcopy_n ? (double)vkcopy_us / vkcopy_n / 1000.0 : 0.0,
-               vkcopy_n,
                stats.frames ? (double)stats.pace_sleep_us / stats.frames / 1000.0
                             : 0.0,
                stats.ff_frames, stats.audio_frames,
