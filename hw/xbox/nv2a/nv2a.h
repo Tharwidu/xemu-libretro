@@ -53,6 +53,7 @@ void nv2a_gl_get_capture_stats(uint64_t *out_us, unsigned *out_count);
 /* Non-blocking: trigger PFIFO to render display image, returns immediately.
  * The display image will be updated asynchronously by the PFIFO thread. */
 void nv2a_trigger_display_render(void);
+int nv2a_gl_age_display_surface_now(void);
 /* Self-contained display readback (GL renderer): when enabled, the PFIFO
  * thread copies each rendered display frame to CPU memory so the frontend
  * can consume plain software frames without touching xemu's GL contexts. */

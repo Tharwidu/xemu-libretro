@@ -267,6 +267,7 @@ static struct {
     unsigned black;            /* no display frame available */
     unsigned src_pgraph, src_vga, src_vk;
     uint64_t capture_us;       /* time inside the frame fetch */
+    uint64_t surface_us;       /* time blocked in the display-surface cycle */
     uint64_t pace_sleep_us;    /* time spent in the pacer */
     unsigned ff_frames;        /* frames while fast-forwarding */
     unsigned audio_frames;     /* audio frames pushed to the frontend */
@@ -303,12 +304,15 @@ static void stats_report_if_due(void)
 
     LRLOG_INFO("[xemu] stats: %.1f fps (%u frames/%.1fs) | delivered %u "
                "dup %u black %u | src pgraph %u vga %u vk %u | capture "
-               "%.2f ms/f | guest %.1f/s (%u new) | gpucopy %.2f ms | "
-               "pace %.2f ms/f | ff %u | audio %u frames (%.0f/s)\n",
+               "%.2f ms/f | surface %.2f ms/f | guest %.1f/s (%u new) | "
+               "gpucopy %.2f ms | pace %.2f ms/f | ff %u | "
+               "audio %u frames (%.0f/s)\n",
                stats.frames / secs, stats.frames, secs,
                stats.delivered, stats.duped, stats.black,
                stats.src_pgraph, stats.src_vga, stats.src_vk,
                stats.frames ? (double)stats.capture_us / stats.frames / 1000.0
+                            : 0.0,
+               stats.frames ? (double)stats.surface_us / stats.frames / 1000.0
                             : 0.0,
                vkcopy_n / secs, vkcopy_n,
                vkcopy_n ? (double)vkcopy_us / vkcopy_n / 1000.0 : 0.0,
@@ -2196,6 +2200,69 @@ static bool xemu_debug_logs(void)
     return cached;
 }
 
+/* The OpenGL software readback path does not wait for the display pass to
+ * finish; it only ages the surface cache. Measured on Halo 2 at 52.1 fps
+ * mean / 29.2 min blocking against 59.5 / 53.7 async, and on Halo CE at
+ * 55.5 / 29.3 against 59.9 / 59.7 - the wait was the entire gap between
+ * this renderer and Vulkan, which has never blocked here.
+ *
+ * XEMU_GL_SYNC_SURFACE=1 restores the blocking form. Keep it: the wait was
+ * originally introduced against stale-surface artifacts (black menus,
+ * misoriented FMV), and if one of those ever reappears this is the first
+ * thing to flip to attribute it. */
+static bool gl_sync_surface(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *v = getenv("XEMU_GL_SYNC_SURFACE");
+        cached = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    return cached;
+}
+
+/* XEMU_DUMP_FRAMES=<dir> writes the frame actually handed to the frontend as
+ * a PPM every 300 deliveries. Unlike XEMU_DUMP_DISPLAY, which lives in the
+ * OpenGL capture, this sits in the delivery path and therefore works for
+ * both renderers - which is what makes an OpenGL/Vulkan visual comparison
+ * possible at all. */
+static void dump_delivered_frame(const uint32_t *frame, int w, int h)
+{
+    static const char *dir;
+    static int checked;
+    static unsigned seq;
+
+    if (!checked) {
+        dir = getenv("XEMU_DUMP_FRAMES");
+        checked = 1;
+    }
+    if (!dir || !frame || w <= 0 || h <= 0) {
+        return;
+    }
+    if ((seq++ % 300) != 0) {
+        return;
+    }
+
+    char path[1024];
+    if (snprintf(path, sizeof(path), "%s/frame_%06u.ppm", dir, seq - 1)
+            >= (int)sizeof(path)) {
+        return;
+    }
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        return;
+    }
+    fprintf(f, "P6\n%d %d\n255\n", w, h);
+    for (int i = 0; i < w * h; i++) {
+        /* Frames are delivered as XRGB8888, top-down. */
+        uint32_t p = frame[i];
+        unsigned char rgb[3] = { (unsigned char)((p >> 16) & 0xff),
+                                 (unsigned char)((p >> 8) & 0xff),
+                                 (unsigned char)(p & 0xff) };
+        fwrite(rgb, 1, 3, f);
+    }
+    fclose(f);
+}
+
 RETRO_API void retro_run(void)
 {
     static int run_count = 0;
@@ -2389,6 +2456,7 @@ RETRO_API void retro_run(void)
          * render_display has completed, at which point our PFIFO-side
          * capture holds exactly the frame the HW path would blit. */
         int pg_tex = 0;
+        const int64_t surface_start_us = g_get_monotonic_time();
         if (emu_initialized) {
             if (use_vulkan) {
                 /* Ask for a render and move on. The blocking form below
@@ -2399,11 +2467,24 @@ RETRO_API void retro_run(void)
                  * whatever the emulation thread last finished, which is
                  * how the OpenGL PBO path already behaves. */
                 nv2a_trigger_display_render();
-            } else {
+            } else if (gl_sync_surface()) {
+                /* Diagnostic fallback only - see gl_sync_surface(). */
                 pg_tex = nv2a_get_framebuffer_surface();
                 nv2a_release_framebuffer_surface();
+            } else {
+                /* Same split, applied to OpenGL: age the display surface but
+                 * do not wait for the pass to finish. Measured at 0.6-8.9 ms
+                 * per frame on Halo 2, inversely tracking its frame rate,
+                 * against 0.00 ms for the Vulkan form above. */
+                pg_tex = nv2a_gl_age_display_surface_now();
             }
         }
+        /* Measured separately from capture_us below, which starts after this
+         * point. On the OpenGL path this is a synchronous wait on the
+         * emulation thread; Vulkan only posts a request. It was the one cost
+         * in this path that nothing counted. */
+        stats.surface_us +=
+            (uint64_t)(g_get_monotonic_time() - surface_start_us);
 
         int w = 0, h = 0;
         bool got = false;
@@ -2458,6 +2539,7 @@ RETRO_API void retro_run(void)
         stats.capture_us +=
             (uint64_t)(g_get_monotonic_time() - capture_start_us);
         if (got) {
+            dump_delivered_frame(readback_frame, w, h);
             stats.delivered++;
             if (use_vulkan) {
                 stats.src_vk++;

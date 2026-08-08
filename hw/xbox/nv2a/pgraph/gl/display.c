@@ -99,6 +99,17 @@ void nv2a_gl_get_capture_stats(uint64_t *out_us, unsigned *out_count)
     qemu_mutex_unlock(&disp_readback.lock);
 }
 
+/* nv2a-level entry for the software readback path; see
+ * pgraph_gl_age_display_surface() for why this does not block. */
+int nv2a_gl_age_display_surface_now(void)
+{
+    NV2AState *d = g_nv2a;
+    if (!d) {
+        return 0;
+    }
+    return pgraph_gl_age_display_surface(d);
+}
+
 bool nv2a_gl_get_display_frame(uint32_t *dst, int dst_cap_pixels,
                                int *out_width, int *out_height)
 {
@@ -674,6 +685,48 @@ void pgraph_gl_sync(NV2AState *d)
 
     qatomic_set(&d->pgraph.sync_pending, false);
     qemu_event_set(&d->pgraph.sync_complete);
+}
+
+/* Non-blocking counterpart of pgraph_gl_get_framebuffer_surface below.
+ *
+ * That function does two separable things: it ages the display surface in
+ * the cache (surface->frame_time), which is what keeps surface selection
+ * correct, and it then waits for the PFIFO thread to finish a display pass.
+ * The wait is only needed by callers that consume the returned texture.
+ *
+ * The software readback path does not: it uses the return value purely as
+ * "is there a surface at the display address", then reads the PBO mirror,
+ * which is a frame behind by design anyway. So it wants the aging without
+ * the wait - the same shape the Vulkan path already uses via
+ * nv2a_trigger_display_render(). Returns the display buffer, which may be
+ * from the previous pass; callers must not treat it as this frame's image.
+ */
+int pgraph_gl_age_display_surface(NV2AState *d)
+{
+    PGRAPHState *pg = &d->pgraph;
+    PGRAPHGLState *r = pg->gl_renderer_state;
+
+    qemu_mutex_lock(&d->pfifo.lock);
+
+    VGADisplayParams vga_display_params;
+    d->vga.get_params(&d->vga, &vga_display_params);
+
+    SurfaceBinding *surface = pgraph_gl_surface_get_within(
+        d, d->pcrtc.start + vga_display_params.line_offset);
+    if (surface == NULL || !surface->color) {
+        qemu_mutex_unlock(&d->pfifo.lock);
+        return 0;
+    }
+
+    surface->frame_time = pg->frame_time;
+    if (!qatomic_read(&pg->sync_pending)) {
+        qemu_event_reset(&pg->sync_complete);
+        qatomic_set(&pg->sync_pending, true);
+        pfifo_kick(d);
+    }
+    qemu_mutex_unlock(&d->pfifo.lock);
+
+    return r->gl_display_buffer;
 }
 
 int pgraph_gl_get_framebuffer_surface(NV2AState *d)
