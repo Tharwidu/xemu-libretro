@@ -9,7 +9,12 @@ systemname = "Microsoft Xbox"
 systemid = "xbox"
 license = "GPLv2"
 permissions = ""
-display_version = "0.8.x"
+# The core's own release line. It deliberately does not name an upstream xemu
+# version: this file is static while the core reports a git-derived string from
+# retro_get_system_info (e.g. 0.1.0-emuvr-rc1-58-g...), and the two silently
+# disagreeing is worse than one of them being coarse. Check the log line at
+# load for the exact build.
+display_version = "0.1.0-emuvr"
 supports_no_game = "false"
 
 # Hardware Information
