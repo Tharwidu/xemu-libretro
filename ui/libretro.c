@@ -182,7 +182,6 @@ static bool opt_use_dsp = false;
 static int  opt_surface_scale = 1;
 static int  opt_avpack = CONFIG_SYS_AVPACK_HDTV;
 static bool opt_cache_shaders = true;
-static int  opt_filtering = CONFIG_DISPLAY_FILTERING_LINEAR;
 static int  opt_audio_volume = 100;
 static int  opt_network_backend = 0; /* 0=disabled, 1=nat */
 static int  opt_frame_output = 0; /* 0=auto, 1=hardware, 2=software */
@@ -1149,13 +1148,6 @@ static void update_variables(void)
         opt_cache_shaders = !strcmp(var.value, "enabled");
     }
 
-    var.key = "xemu_display_filtering";
-    var.value = NULL;
-    if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
-        if (!strcmp(var.value, "nearest")) opt_filtering = CONFIG_DISPLAY_FILTERING_NEAREST;
-        else                              opt_filtering = CONFIG_DISPLAY_FILTERING_LINEAR;
-    }
-
     var.key = "xemu_renderer";
     var.value = NULL;
     opt_renderer = RENDERER_AUTO;
@@ -1180,16 +1172,15 @@ static void update_variables(void)
         if (opt_audio_volume > 100) opt_audio_volume = 100;
     }
 
-    LRLOG_INFO("[xemu] Options: memory=%dMB, scale=%d, avpack=%d, cache=%d, filter=%d, volume=%d%%, network=%s\n",
+    LRLOG_INFO("[xemu] Options: memory=%dMB, scale=%d, avpack=%d, cache=%d, volume=%d%%, network=%s\n",
                opt_memory_mb, opt_surface_scale,
-               opt_avpack, opt_cache_shaders, opt_filtering, opt_audio_volume,
+               opt_avpack, opt_cache_shaders, opt_audio_volume,
                opt_network_backend == 1 ? "nat" : "disabled");
 
     /* Apply runtime-safe options */
     if (emu_initialized) {
         g_config.audio.volume_limit = opt_audio_volume / 100.0f;
         g_config.display.quality.surface_scale = opt_surface_scale;
-        g_config.display.filtering = opt_filtering;
         g_config.perf.cache_shaders = opt_cache_shaders;
         g_config.audio.use_dsp = opt_use_dsp;
     }
@@ -1247,7 +1238,6 @@ static void populate_config(const char *dvd_path)
     g_config.audio.use_dsp = opt_use_dsp;
     g_config.display.quality.surface_scale = opt_surface_scale;
     g_config.sys.avpack = opt_avpack;
-    g_config.display.filtering = opt_filtering;
 
     /* Set network configuration */
     g_config.net.enable = (opt_network_backend == 1);
@@ -1990,6 +1980,24 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
                want_vulkan ? "Vulkan" : "OpenGL",
                opt_renderer == RENDERER_OPENGL ? "opengl" :
                opt_renderer == RENDERER_VULKAN ? "vulkan" : "auto");
+
+    /* Hide options the active renderer cannot honour, rather than leaving a
+     * control that silently does nothing.
+     *
+     * g_config.perf.cache_shaders gates the *on-disk* shader cache, which
+     * only the OpenGL renderer implements (pgraph/gl/shaders.c). The Vulkan
+     * renderer keeps an in-memory LRU and nothing else, so under Vulkan the
+     * setting has no effect at all.
+     *
+     * Frontends that predate this call (RA 1.7.5) simply ignore it, which is
+     * the correct degradation: the option stays visible there and is no more
+     * wrong than it is today. */
+    if (environ_cb) {
+        struct retro_core_option_display od;
+        od.key = "xemu_cache_shaders";
+        od.visible = !want_vulkan;
+        environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &od);
+    }
 
     if (frame_readback) {
         /* Pure software core: the frontend must render our frames itself

@@ -209,7 +209,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         "xemu_cache_shaders",
         "Shader Cache",
         NULL,
-        "Cache compiled GPU shaders to disk. Reduces stutter on subsequent runs.",
+        "Cache compiled GPU shaders to disk. Reduces stutter on subsequent runs. OpenGL renderer only - the Vulkan renderer has no on-disk shader cache, so this setting is hidden and does nothing while Vulkan is selected.",
         NULL,
         "video",
         {
@@ -267,20 +267,12 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         },
         "auto"
     },
-    {
-        "xemu_display_filtering",
-        "Display Filtering",
-        NULL,
-        "Texture filtering mode for the display output.",
-        NULL,
-        "video",
-        {
-            { "linear",  "Bilinear" },
-            { "nearest", "Nearest Neighbor" },
-            { NULL, NULL },
-        },
-        "linear"
-    },
+    /* No "Display Filtering" option here on purpose. g_config.display.filtering
+     * is read only by ui/xui/gl-helpers.cc, which is imgui UI code the libretro
+     * build does not compile, so the setting did nothing at all. Scaling the
+     * delivered frame is the frontend's job - RetroArch's own video smoothing
+     * setting - and a core option that silently does nothing is worse than an
+     * absent one. */
     { NULL, NULL, NULL, NULL, NULL, NULL, { { NULL, NULL } }, NULL },
 };
 
