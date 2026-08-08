@@ -21,6 +21,7 @@
 #include "hw/xbox/nv2a/pgraph/thirdparty/gloffscreen/gloffscreen.h"
 #include "ui/libretro-internal.h"
 #include "ui/xemu-widescreen.h"
+#include "ui/xemu-notifications.h"
 #include "crypto/init.h"
 #include "ui/console.h"
 #include "hw/xbox/nv2a/nv2a.h"
@@ -2776,10 +2777,26 @@ RETRO_API void retro_reset(void)
 #define LIBRETRO_SAVESTATE_SIZE  4096
 #define LIBRETRO_SAVESTATE_MAGIC 0x58454D55 /* 'XEMU' */
 
+/* Renderer identity, stamped into the header.
+ *
+ * A save state restores full machine state, and NV2A state is renderer-
+ * specific: a state written under OpenGL and restored under Vulkan is at
+ * best a black screen and at worst a crash. That mismatch used to be
+ * unreachable because the renderer was not selectable; it became reachable
+ * with xemu_renderer, and it becomes likely now that "auto" prefers Vulkan
+ * while every state written before this change was made under OpenGL.
+ *
+ * Version 1 headers have no renderer field. They predate the selectable
+ * renderer, so they can only have come from OpenGL. */
+#define SAVESTATE_RENDERER_UNKNOWN 0
+#define SAVESTATE_RENDERER_OPENGL  1
+#define SAVESTATE_RENDERER_VULKAN  2
+
 struct libretro_savestate_header {
     uint32_t magic;
     uint32_t version;
     uint64_t timestamp;
+    uint32_t renderer;
 };
 
 static bool snapshot_dispatch(int request_type, int timeout_ms)
@@ -2828,8 +2845,10 @@ RETRO_API bool retro_serialize(void *data, size_t size)
 
     struct libretro_savestate_header *hdr = (struct libretro_savestate_header *)data;
     hdr->magic = LIBRETRO_SAVESTATE_MAGIC;
-    hdr->version = 1;
+    hdr->version = 2;
     hdr->timestamp = (uint64_t)time(NULL);
+    hdr->renderer = use_vulkan ? SAVESTATE_RENDERER_VULKAN
+                               : SAVESTATE_RENDERER_OPENGL;
 
     LRLOG_INFO("[xemu] retro_serialize: snapshot saved to HDD image\n");
     return true;
@@ -2844,6 +2863,26 @@ RETRO_API bool retro_unserialize(const void *data, size_t size)
         (const struct libretro_savestate_header *)data;
     if (hdr->magic != LIBRETRO_SAVESTATE_MAGIC) {
         LRLOG_INFO("[xemu] retro_unserialize: invalid magic 0x%08x\n", hdr->magic);
+        return false;
+    }
+
+    /* Refuse a cross-renderer restore rather than loading it into a machine
+     * whose GPU state cannot represent it. Saying so is the whole point: the
+     * alternative failure is a black screen the user cannot attribute. */
+    unsigned state_renderer = (hdr->version >= 2) ? hdr->renderer
+                                                  : SAVESTATE_RENDERER_OPENGL;
+    unsigned this_renderer = use_vulkan ? SAVESTATE_RENDERER_VULKAN
+                                        : SAVESTATE_RENDERER_OPENGL;
+    if (state_renderer != SAVESTATE_RENDERER_UNKNOWN &&
+        state_renderer != this_renderer) {
+        const char *want = (state_renderer == SAVESTATE_RENDERER_VULKAN)
+                           ? "Vulkan" : "OpenGL";
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+                 "Save state was made with the %s renderer; set Renderer to "
+                 "%s and restart to load it.", want, want);
+        LRLOG_ERROR("[xemu] retro_unserialize: %s\n", msg);
+        xemu_queue_error_message(msg);
         return false;
     }
 
