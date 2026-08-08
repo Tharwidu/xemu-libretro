@@ -235,7 +235,18 @@ static const char *display_frag_glsl =
 #endif
     "    out_Color.rgba = texture(tex, tex_coord);\n"
     "    if (pvideo_enable) {\n"
+#ifdef LIBRETRO
+    /* The GL-compat flip above is disabled in this build, because the
+     * readback path copies the image top-down and hands it straight to the
+     * frontend. That leaves gl_FragCoord.y top-origin, which is the same
+     * origin the guest's pvideo out_y uses, so the overlay needs no
+     * conversion here either. Converting it - as the non-libretro line
+     * below does, to match the flip it pairs with - samples the video
+     * bottom-up and renders FMV upside down. */
+    "        vec2 screen_coord = gl_FragCoord.xy * pvideo_scale.z;\n"
+#else
     "        vec2 screen_coord = vec2(gl_FragCoord.x, display_size.y - gl_FragCoord.y) * pvideo_scale.z;\n"
+#endif
     "        vec4 output_region = vec4(pvideo_pos.xy, pvideo_pos.xy + pvideo_pos.zw);\n"
     "        bvec4 clip = bvec4(lessThan(screen_coord, output_region.xy),\n"
     "                           greaterThan(screen_coord, output_region.zw));\n"
