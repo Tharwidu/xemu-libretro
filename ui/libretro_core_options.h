@@ -241,7 +241,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         "xemu_renderer",
         "Renderer",
         NULL,
-        "Which NV2A renderer the emulator uses internally, as in standalone xemu. 'Auto' follows the frontend's hardware-render context, which means OpenGL on RetroArch 1.7.5. Both renderers work in either frame output mode; if a renderer cannot be used the core falls back to the other and says why in the log. Requires restart.",
+        "Which NV2A renderer the emulator uses internally, as in standalone xemu. 'Auto' selects Vulkan in software frame output mode, where it is measurably faster on demanding titles, and follows the frontend's hardware-render context otherwise. Both renderers work in either frame output mode; if a renderer cannot be used the core falls back to the other and says why in the log. Save states cannot be moved between renderers - loading one made with the other is refused. Requires restart.",
         NULL,
         "video",
         {

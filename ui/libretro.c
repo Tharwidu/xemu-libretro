@@ -1956,7 +1956,20 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
         want_vulkan = true;
         break;
     default:
-        want_vulkan = (preferred_hw == RETRO_HW_CONTEXT_VULKAN);
+        /* In software readback mode the internal renderer is a free choice:
+         * frames reach the frontend as memory frames either way, so nothing
+         * outside the core depends on which one ran. Vulkan is the better
+         * default there - it has never blocked in the readback path, and on
+         * the two titles that do not reach the frame cap it measured 59.9 /
+         * 59.7 against OpenGL's 55.5 / 29.3 (Halo CE) before the OpenGL wait
+         * was removed, and holds parity after.
+         *
+         * In hardware render mode the choice is not free: the frontend has
+         * negotiated a context of one type and the display image is handed
+         * over through it, so follow what the frontend asked for. */
+        want_vulkan = frame_readback
+                          ? true
+                          : (preferred_hw == RETRO_HW_CONTEXT_VULKAN);
         break;
     }
 
