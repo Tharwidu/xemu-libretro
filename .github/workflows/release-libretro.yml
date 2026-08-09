@@ -29,6 +29,17 @@ jobs:
         with:
           fetch-depth: 0
           submodules: recursive
+      - name: Allow git to read the checkout
+        run: |
+          # This job runs inside a container while actions/checkout runs on the
+          # host, so the repository is owned by a different uid than the one
+          # building. Git then refuses it as "dubious ownership", every git
+          # command in the build fails, and scripts/xemu-version.py silently
+          # falls back to 0.0.0 - which is what v0.2.0-emuvr shipped as. The
+          # Linux job is unaffected because checkout sets this itself when it
+          # runs on the same host that builds.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          echo "version will be: $(git describe --tags --match 'v*' 2>&1)"
       - name: Build core
         run: |
           # build.sh exits nonzero after configuring the standalone target;
