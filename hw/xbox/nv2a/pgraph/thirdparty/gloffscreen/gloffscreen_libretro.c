@@ -165,6 +165,10 @@ GloContext *glo_context_create(void)
 
     if (!g_wndclass_registered) {
         WNDCLASSA wc = {0};
+        /* Give the class a real background brush. Left NULL, WM_ERASEBKGND
+         * paints whatever happens to be in the DC, which is the other half
+         * of the white-strip artifact described at CreateWindowA below. */
+        wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
         wc.lpfnWndProc = DefWindowProcA;
         wc.hInstance = GetModuleHandle(NULL);
         wc.lpszClassName = "XemuGloOffscreen";
@@ -172,8 +176,15 @@ GloContext *glo_context_create(void)
         g_wndclass_registered = true;
     }
 
+    /* WS_POPUP, not 0. A dwStyle of 0 is WS_OVERLAPPED, which gives this
+     * window a caption bar even though we only ever want a drawable for a
+     * GL context and never show it. Under wine that caption was reaching the
+     * screen as a white strip flickering across the top of the frontend's
+     * window - present on every title, absent from other cores, and absent
+     * on POSIX because that backend uses EGL/GLX surfaces and creates no OS
+     * window at all. WS_POPUP has no caption and no border. */
     context->hwnd = CreateWindowA("XemuGloOffscreen", "Offscreen",
-                                   0, 0, 0, 1, 1,
+                                   WS_POPUP, 0, 0, 1, 1,
                                    NULL, NULL, GetModuleHandle(NULL), NULL);
     if (!context->hwnd) {
         free(context);
