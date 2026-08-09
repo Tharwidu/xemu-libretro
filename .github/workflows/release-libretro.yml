@@ -9,15 +9,16 @@ name: Release libretro core
 
 on:
   push:
-    # Releases are named plainly - v0.2.0 - to match the sibling xenia core,
-    # so this cannot key on an "-emuvr" suffix any more.
+    # A suffix is mandatory here, and not a stylistic choice: this repository
+    # is a fork of xemu and carries upstream's own release tags, which occupy
+    # v0.0.0 through v0.8.x and v1.0.0-alpha. Plain semantic version tags are
+    # therefore already taken - v0.2.0 belongs to upstream and is an ancestor
+    # of this branch. Matching a bare "v*" would also mean a stray
+    # "git push --tags" publishes a release for every upstream tag.
     #
-    # CAUTION: this repository also carries upstream xemu's own tags (v0.8.x,
-    # v1.0.0-alpha), which match this pattern. They are already present from
-    # fetching and firing only happens on *push*, so in normal use only our
-    # own tags trigger a release. Push release tags one at a time - a bare
-    # "git push --tags" would try to publish a release for every upstream tag.
-    tags: ['v*']
+    # The sibling xenia core does ship plain tags; its upstream did not claim
+    # them. Do not copy that convention here.
+    tags: ['v*-emuvr*', 'v*-libretro*']
   workflow_dispatch:
     inputs:
       version:
