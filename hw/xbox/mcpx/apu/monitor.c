@@ -23,6 +23,7 @@
 
 #include "qemu/atomic.h"
 #include <stdint.h>
+#include <math.h>
 
 int libretro_audio_pull(int16_t *out_buf, int max_frames);
 
@@ -61,11 +62,36 @@ int libretro_audio_pull(int16_t *out_buf, int max_frames)
     }
     if (avail > max_frames) avail = max_frames;
 
+    /* Volume limit. Upstream applies this with SDL_SetAudioStreamGain on the
+     * monitor stream (see the !LIBRETRO branch below), which this build does
+     * not have - so without applying it here the "Audio Volume Limit" core
+     * option would set a g_config field that nothing we compile ever reads.
+     * Same perceptual curve as upstream, so a given percentage sounds the
+     * same in both builds.
+     *
+     * Applied on pull rather than when filling the ring, so a live change
+     * takes effect immediately instead of after the buffered frames drain,
+     * and skipped entirely at unity so the default path is untouched.
+     *
+     * No clamping needed: |sample| <= 32768 and gain <= 1.0, so the product
+     * cannot leave int16 range. */
+    float gain = (float)pow(fmax(0.0, fmin((double)g_config.audio.volume_limit,
+                                           1.0)), M_E);
+    bool attenuate = gain < 0.999f;
+
     for (int i = 0; i < avail; i++) {
-        out_buf[i * 2 + 0] = apu_ring[rp];
+        int16_t l = apu_ring[rp];
         rp = (rp + 1) % LIBRETRO_APU_RING_SAMPLES;
-        out_buf[i * 2 + 1] = apu_ring[rp];
+        int16_t r = apu_ring[rp];
         rp = (rp + 1) % LIBRETRO_APU_RING_SAMPLES;
+
+        if (attenuate) {
+            l = (int16_t)lrintf((float)l * gain);
+            r = (int16_t)lrintf((float)r * gain);
+        }
+
+        out_buf[i * 2 + 0] = l;
+        out_buf[i * 2 + 1] = r;
     }
     qatomic_set(&apu_ring_rp, rp);
     return avail;
