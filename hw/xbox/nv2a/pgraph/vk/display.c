@@ -1353,6 +1353,11 @@ static void perf_count_display_render(const char *renderer)
     }
 }
 
+/* Both of these touch vk_readback, which is defined inside the LIBRETRO
+ * block above. They are declared and called only from LIBRETRO paths, but
+ * their definitions sat outside the guard, so a standalone build failed on
+ * an undeclared identifier. */
+#ifdef LIBRETRO
 static void capture_record_copy(PGRAPHState *pg, VkCommandBuffer cmd)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -1440,6 +1445,7 @@ static void capture_publish_copy(PGRAPHState *pg)
     vk_readback.copy_count++;
     qemu_mutex_unlock(&vk_readback.lock);
 }
+#endif /* LIBRETRO */
 
 void pgraph_vk_render_display(PGRAPHState *pg)
 {
