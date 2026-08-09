@@ -1015,6 +1015,47 @@ static void show_user_message(const char *text)
     }
 }
 
+/* Largest internal-resolution scale the software readback staging buffer can
+ * carry, and the clamp that keeps an over-large setting from degrading to the
+ * VGA fallback.
+ *
+ * Both nv2a_gl_get_display_frame() and its Vulkan twin refuse a frame larger
+ * than the destination capacity (w * h > dst_cap_pixels -> false), and the
+ * caller then falls through to the VGA scanout surface - so an over-large
+ * scale did not merely fail to scale, it presented the wrong image. At the
+ * Xbox's 640x480 the cliff is scale 3 (1920x1440 = 2.76 Mpx against a
+ * 2.07 Mpx buffer).
+ *
+ * The hardware (FBO) path stages nothing and keeps the full range.
+ *
+ * `announce` exists so the warning is emitted once at load rather than on
+ * every option-change callback. */
+static int clamp_scale_for_frame_output(int scale, bool announce)
+{
+    unsigned max_scale = 1;
+
+    if (!frame_readback) {
+        return scale;
+    }
+
+    while ((max_scale + 1) * XBOX_NATIVE_WIDTH *
+           (max_scale + 1) * XBOX_NATIVE_HEIGHT <=
+           (unsigned)(READBACK_MAX_W * READBACK_MAX_H)) {
+        max_scale++;
+    }
+
+    if (scale > (int)max_scale) {
+        if (announce) {
+            LRLOG_WARN("[xemu] Internal Resolution Scale %dx exceeds the "
+                       "software readback buffer (%dx%d); using %ux. Use "
+                       "Hardware (FBO) frame output for higher scales.\n",
+                       scale, READBACK_MAX_W, READBACK_MAX_H, max_scale);
+        }
+        return (int)max_scale;
+    }
+    return scale;
+}
+
 static void update_variables(void)
 {
     struct retro_variable var;
@@ -1180,7 +1221,9 @@ static void update_variables(void)
     /* Apply runtime-safe options */
     if (emu_initialized) {
         g_config.audio.volume_limit = opt_audio_volume / 100.0f;
-        g_config.display.quality.surface_scale = opt_surface_scale;
+        /* Silent here: the reason was already logged once at load. */
+        g_config.display.quality.surface_scale =
+            clamp_scale_for_frame_output(opt_surface_scale, false);
         g_config.perf.cache_shaders = opt_cache_shaders;
         g_config.audio.use_dsp = opt_use_dsp;
     }
@@ -1914,6 +1957,10 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
     LRLOG_INFO("[xemu] Frame output: %s\n",
                frame_readback ? "software readback (self-contained, isolated GL)"
                               : "hardware (direct FBO)");
+
+    /* frame_readback is now known, so the internal-resolution scale can be
+     * held to what this frame path can actually stage. See the helper. */
+    opt_surface_scale = clamp_scale_for_frame_output(opt_surface_scale, true);
 
     /* Query the frontend's preferred HW render context */
     unsigned preferred_hw = RETRO_HW_CONTEXT_OPENGL_CORE;
