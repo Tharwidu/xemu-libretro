@@ -1253,8 +1253,12 @@ static void update_variables(void)
         if (opt_audio_volume > 100) opt_audio_volume = 100;
     }
 
-    LRLOG_INFO("[xemu] Options: memory=%dMB, scale=%d, avpack=%d, cache=%d, volume=%d%%, network=%s\n",
-               opt_memory_mb, opt_surface_scale,
+    /* Scale is deliberately not on this line. It can still be clamped by the
+     * frame output mode, which is not known until retro_load_game, so printing
+     * it here would state a value that may not be the one in effect. It gets
+     * its own line once resolved. */
+    LRLOG_INFO("[xemu] Options: memory=%dMB, avpack=%d, cache=%d, volume=%d%%, network=%s\n",
+               opt_memory_mb,
                opt_avpack, opt_cache_shaders, opt_audio_volume,
                opt_network_backend == 1 ? "nat" : "disabled");
 
@@ -1617,6 +1621,13 @@ RETRO_API void retro_get_system_av_info(struct retro_system_av_info *info)
 
 RETRO_API void retro_init(void)
 {
+    /* Identify the build in the log. retro_get_system_info() already reports
+     * this string as library_version, but no RetroArch generation prints that
+     * at any log level - checked against 1.7.5 and 1.22.2 - so a log could not
+     * answer "which build produced this?" despite every hand-off document in
+     * the project telling readers to check exactly that. Without this line the
+     * only way to identify a core is the md5 of the DLL. */
+    LRLOG_INFO("[xemu] xemu-libretro %s\n", xemu_version);
     LRLOG_INFO("[xemu] retro_init\n");
 
     /* Initialize Windows TLS keys for __thread replacements */
@@ -2385,6 +2396,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
     /* frame_readback is now known, so the internal-resolution scale can be
      * held to what this frame path can actually stage. See the helper. */
     opt_surface_scale = clamp_scale_for_frame_output(opt_surface_scale, true);
+    LRLOG_INFO("[xemu] Internal resolution scale: %dx\n", opt_surface_scale);
 
     /* Query the frontend's preferred HW render context */
     unsigned preferred_hw = RETRO_HW_CONTEXT_OPENGL_CORE;

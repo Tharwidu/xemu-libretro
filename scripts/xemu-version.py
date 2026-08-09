@@ -35,15 +35,28 @@ def main():
     # Get version
     xemu_version = ""
     if os.path.exists(git_dir):
-        try:
-            result = subprocess.run(['git', 'describe', '--tags', '--match', 'v*'], 
-                                   cwd=source_dir, capture_output=True, text=True)
-            if result.returncode == 0:
-                xemu_version = result.stdout.strip()
-                if xemu_version.startswith('v'):
-                    xemu_version = xemu_version[1:]
-        except:
-            pass
+        # --match is tried first because it keeps a stray non-version tag from
+        # naming the build, but it cannot be relied on: Git for Windows links
+        # the MSYS runtime, which glob-expands the child command line before
+        # git sees it. 'v*' matches no file in the repo root, so the pattern
+        # arrives mangled and git answers "No names found, cannot describe
+        # anything" (rc 128) even though plain --tags describes fine. That made
+        # every local Windows build silently report 0.0.0 while CI, on Linux
+        # containers, versioned correctly - so the failure was invisible from
+        # the side that ships. Fall back to plain --tags rather than lose the
+        # version entirely.
+        for args in (['git', 'describe', '--tags', '--match', 'v*'],
+                     ['git', 'describe', '--tags']):
+            try:
+                result = subprocess.run(args, cwd=source_dir,
+                                        capture_output=True, text=True)
+                if result.returncode == 0 and result.stdout.strip():
+                    xemu_version = result.stdout.strip()
+                    if xemu_version.startswith('v'):
+                        xemu_version = xemu_version[1:]
+                    break
+            except:
+                pass
     else:
         version_file = os.path.join(source_dir, 'XEMU_VERSION')
         if os.path.exists(version_file):
