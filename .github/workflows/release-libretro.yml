@@ -18,7 +18,11 @@ on:
     #
     # The sibling xenia core does ship plain tags; its upstream did not claim
     # them. Do not copy that convention here.
-    tags: ['v*-emuvr*', 'v*-libretro*']
+    # The core's own releases live in the v0.2.x space. Upstream owns v0.2.0
+    # itself and does use patch versions elsewhere (v0.4.1, v0.5.1-4), so this
+    # is a shared namespace rather than a reserved one - but upstream is long
+    # past it, at v0.8.x and v1.0.0-alpha, and will not revisit v0.2.x.
+    tags: ['v0.2.*', 'v*-emuvr*', 'v*-libretro*']
   workflow_dispatch:
     inputs:
       version:
