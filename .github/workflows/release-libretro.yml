@@ -9,11 +9,19 @@ name: Release libretro core
 
 on:
   push:
-    tags: ['v*-emuvr*']
+    # Releases are named plainly - v0.2.0 - to match the sibling xenia core,
+    # so this cannot key on an "-emuvr" suffix any more.
+    #
+    # CAUTION: this repository also carries upstream xemu's own tags (v0.8.x,
+    # v1.0.0-alpha), which match this pattern. They are already present from
+    # fetching and firing only happens on *push*, so in normal use only our
+    # own tags trigger a release. Push release tags one at a time - a bare
+    # "git push --tags" would try to publish a release for every upstream tag.
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       version:
-        description: Version/tag to publish (e.g. v0.1.0-emuvr-preview)
+        description: Version/tag to publish (e.g. v0.2.0)
         required: true
 
 permissions:
