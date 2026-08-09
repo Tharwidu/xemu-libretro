@@ -2322,8 +2322,12 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
 
         /* Warn early about content that is not an xiso image (redump-style
          * dumps need conversion, e.g. with extract-xiso): the console
-         * otherwise silently boots to the dashboard. */
-        f = fopen(game->path, "rb");
+         * otherwise silently boots to the dashboard.
+         *
+         * Probe the disc actually mounted, not game->path: for a playlist
+         * those differ, and probing the .m3u told every multi-disc user their
+         * content was not an xiso - on the OSD, every launch. */
+        f = fopen(disc_paths[disc_index], "rb");
         if (f) {
             static const char xiso_magic[] = "MICROSOFT*XBOX*MEDIA";
             static const int64_t offsets[] = { 0x10000, 0x18310000 };
