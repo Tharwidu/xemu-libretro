@@ -16,6 +16,9 @@
 #include "system/runstate.h"
 #include "system/cpus.h"
 #include "migration/snapshot.h"
+#include "qapi/error.h"
+#include "qapi/qapi-commands-block.h"   /* qmp_eject, qmp_blockdev_change_medium */
+#include "hw/xbox/smbus.h"              /* SMC eject button + tray state */
 #include "hw/xbox/eeprom_generation.h"
 #include "hw/xbox/nv2a/pgraph/thirdparty/gloffscreen/gloffscreen_libretro.h"
 #include "hw/xbox/nv2a/pgraph/thirdparty/gloffscreen/gloffscreen.h"
@@ -159,6 +162,43 @@ static volatile bool snapshot_result = false;
 static QemuSemaphore snapshot_done_sem;       /* signal RA thread */
 static bool snapshot_sem_initialized = false;
 static char snapshot_name[32] = "libretro_save";
+
+/* --- Disk control (multi-disc titles) ---------------------------------- *
+ *
+ * A handful of Xbox titles ship on two discs. The frontend drives the swap
+ * through the libretro disk-control interface; the actual medium change has
+ * to happen on the emulation thread under the BQL, so it goes through the
+ * same request/semaphore handshake the snapshot code uses rather than
+ * touching the block layer from the frontend thread.
+ *
+ * Xbox software only notices a disc change if the SMC eject button is
+ * pressed and the tray state is republished, which is why the swap is not
+ * simply qmp_blockdev_change_medium(). That sequence is lifted from
+ * upstream's xemu_load_disc() in ui/xemu.c - a file this build does not
+ * compile (see ui/meson.build), so it is reimplemented here rather than
+ * shared. */
+#define DISC_MAX_IMAGES 8
+#define DISC_SWAP_TIMEOUT_MS 5000
+
+enum {
+    DISC_REQ_NONE = 0,
+    DISC_REQ_EJECT,
+    DISC_REQ_INSERT,
+};
+
+static char     disc_paths[DISC_MAX_IMAGES][4096];
+static char     disc_labels[DISC_MAX_IMAGES][256];
+static unsigned disc_count        = 0;
+static unsigned disc_index        = 0;
+static bool     disc_ejected      = false;
+static bool     disc_from_m3u     = false;
+static unsigned disc_initial_image = 0;
+
+static volatile int  disc_request = DISC_REQ_NONE;
+static volatile bool disc_result  = false;
+static char          disc_request_path[4096];
+static QemuSemaphore disc_done_sem;
+static bool          disc_sem_initialized = false;
 
 /* Pause watchdog: monotonic time of the last retro_run call. The emulator
  * otherwise free-runs in real time while the frontend menu is open. */
@@ -1366,6 +1406,42 @@ static void *emu_thread_func(void *opaque)
             }
         }
 
+        /* Disc swap requests from the frontend thread. Runs here because the
+         * block layer needs the BQL, which this thread holds. */
+        if (disc_request != DISC_REQ_NONE) {
+            int req = disc_request;
+            disc_request = DISC_REQ_NONE;
+            Error *disc_err = NULL;
+            bool ok = true;
+
+            /* Xbox software watches the SMC for the eject button; without
+             * pressing it the guest never re-reads the disc. */
+            xbox_smc_eject_button();
+
+            if (req == DISC_REQ_EJECT) {
+                qmp_eject("ide0-cd1", NULL, true, false, &disc_err);
+            } else {
+                qmp_blockdev_change_medium("ide0-cd1", NULL, disc_request_path,
+                                           "raw", false, false, false, 0,
+                                           &disc_err);
+            }
+
+            if (disc_err) {
+                LRLOG_ERROR("[xemu] Disc %s failed: %s\n",
+                            req == DISC_REQ_EJECT ? "eject" : "insert",
+                            error_get_pretty(disc_err));
+                error_free(disc_err);
+                ok = false;
+            }
+
+            xbox_smc_update_tray_state();
+
+            disc_result = ok;
+            if (disc_sem_initialized) {
+                qemu_sem_post(&disc_done_sem);
+            }
+        }
+
         /* Check for snapshot requests from RetroArch thread */
         if (snapshot_request != SNAPSHOT_NONE) {
             int req = snapshot_request;
@@ -1504,7 +1580,7 @@ RETRO_API void retro_get_system_info(struct retro_system_info *info)
     memset(info, 0, sizeof(*info));
     info->library_name     = "xemu";
     info->library_version  = xemu_version;
-    info->valid_extensions = "iso|xiso";
+    info->valid_extensions = "iso|xiso|m3u";
     info->need_fullpath    = true;
     info->block_extract    = true;
 }
@@ -1668,6 +1744,322 @@ static void probe_frontend_caps(void)
                libretro_rumble.set_rumble_state ? "yes" : "no");
 }
 
+/* ========================================================================= */
+/* Disk control                                                              */
+/* ========================================================================= */
+
+/* Hand a medium change to the emulation thread and wait for it. Mirrors
+ * snapshot_dispatch(): the block layer needs the BQL, which only that thread
+ * holds. */
+static bool disc_dispatch(int request_type, const char *path)
+{
+    if (!emu_initialized) {
+        LRLOG_ERROR("[xemu] Disc swap requested before the machine exists\n");
+        return false;
+    }
+
+    if (!disc_sem_initialized) {
+        qemu_sem_init(&disc_done_sem, 0);
+        disc_sem_initialized = true;
+    }
+
+    if (path) {
+        snprintf(disc_request_path, sizeof(disc_request_path), "%s", path);
+    } else {
+        disc_request_path[0] = '\0';
+    }
+
+    disc_result  = false;
+    disc_request = request_type;
+
+    /* The loop may be idle: the watchdog pauses the VM while the frontend
+     * menu is open, which is exactly where a disc swap is initiated. */
+    qemu_notify_event();
+
+    if (qemu_sem_timedwait(&disc_done_sem, DISC_SWAP_TIMEOUT_MS) < 0) {
+        LRLOG_ERROR("[xemu] Disc swap timed out after %dms\n",
+                    DISC_SWAP_TIMEOUT_MS);
+        disc_request = DISC_REQ_NONE;
+        return false;
+    }
+
+    return disc_result;
+}
+
+/* Filename without directory or extension, for the frontend's disc menu. */
+static void disc_make_label(const char *path, char *out, size_t out_sz)
+{
+    const char *base = path;
+    const char *p;
+    size_t len;
+
+    for (p = path; *p; p++) {
+        if (*p == '/' || *p == '\\') {
+            base = p + 1;
+        }
+    }
+
+    len = strlen(base);
+    for (p = base + len; p > base; p--) {
+        if (*p == '.') {
+            len = (size_t)(p - base);
+            break;
+        }
+    }
+
+    if (len >= out_sz) {
+        len = out_sz - 1;
+    }
+    memcpy(out, base, len);
+    out[len] = '\0';
+}
+
+static void disc_add_entry(const char *path)
+{
+    if (disc_count >= DISC_MAX_IMAGES) {
+        LRLOG_WARN("[xemu] More than %d discs listed; ignoring '%s'\n",
+                   DISC_MAX_IMAGES, path);
+        return;
+    }
+    snprintf(disc_paths[disc_count], sizeof(disc_paths[0]), "%s", path);
+    disc_make_label(path, disc_labels[disc_count], sizeof(disc_labels[0]));
+    disc_count++;
+}
+
+/* Parse an M3U into the disc list. Entries may be absolute or relative to
+ * the playlist's own directory, which is the convention every other libretro
+ * core follows. Returns false if nothing usable was found, so the caller can
+ * fall back to treating the path as a plain disc image. */
+static bool disc_parse_m3u(const char *m3u_path)
+{
+    char dir[4096];
+    char line[4096];
+    FILE *f;
+    size_t dir_len = 0;
+    const char *p;
+
+    f = fopen(m3u_path, "r");
+    if (!f) {
+        LRLOG_ERROR("[xemu] Could not open playlist: %s\n", m3u_path);
+        return false;
+    }
+
+    /* Directory portion of the playlist path, kept with its separator. */
+    for (p = m3u_path; *p; p++) {
+        if (*p == '/' || *p == '\\') {
+            dir_len = (size_t)(p - m3u_path) + 1;
+        }
+    }
+    if (dir_len >= sizeof(dir)) {
+        dir_len = sizeof(dir) - 1;
+    }
+    memcpy(dir, m3u_path, dir_len);
+    dir[dir_len] = '\0';
+
+    while (fgets(line, sizeof(line), f)) {
+        char *s = line;
+        char *end;
+
+        while (*s == ' ' || *s == '\t') {
+            s++;
+        }
+        end = s + strlen(s);
+        while (end > s && (end[-1] == '\n' || end[-1] == '\r' ||
+                           end[-1] == ' '  || end[-1] == '\t')) {
+            *--end = '\0';
+        }
+
+        /* Blank lines and #EXTM3U / #EXTINF directives carry no disc. */
+        if (*s == '\0' || *s == '#') {
+            continue;
+        }
+
+        if (s[0] == '/' || s[0] == '\\' ||
+            (s[0] && s[1] == ':')) {          /* absolute, incl. "C:\..." */
+            disc_add_entry(s);
+        } else {
+            char joined[4096];
+            snprintf(joined, sizeof(joined), "%s%s", dir, s);
+            disc_add_entry(joined);
+        }
+    }
+
+    fclose(f);
+
+    if (disc_count == 0) {
+        LRLOG_ERROR("[xemu] Playlist listed no discs: %s\n", m3u_path);
+        return false;
+    }
+
+    disc_from_m3u = true;
+    LRLOG_INFO("[xemu] Playlist: %u disc%s\n", disc_count,
+               disc_count == 1 ? "" : "s");
+    for (unsigned i = 0; i < disc_count; i++) {
+        LRLOG_INFO("[xemu]   disc %u: %s\n", i, disc_labels[i]);
+    }
+    return true;
+}
+
+static bool disc_set_eject_state(bool ejected)
+{
+    if (ejected == disc_ejected) {
+        return true;              /* already there; nothing to do */
+    }
+
+    if (ejected) {
+        if (!disc_dispatch(DISC_REQ_EJECT, NULL)) {
+            return false;
+        }
+        disc_ejected = true;
+        LRLOG_INFO("[xemu] Disc tray open\n");
+        return true;
+    }
+
+    if (disc_index >= disc_count || disc_paths[disc_index][0] == '\0') {
+        LRLOG_ERROR("[xemu] No disc in slot %u to insert\n", disc_index);
+        return false;
+    }
+
+    if (!disc_dispatch(DISC_REQ_INSERT, disc_paths[disc_index])) {
+        return false;
+    }
+
+    disc_ejected = false;
+    /* Keep g_config in step: it is what a save state and the log report as
+     * the mounted disc. */
+    xemu_settings_set_string(&g_config.sys.files.dvd_path,
+                             disc_paths[disc_index]);
+    snprintf(opt_dvd_path, sizeof(opt_dvd_path), "%s", disc_paths[disc_index]);
+    LRLOG_INFO("[xemu] Disc tray closed on %u: %s\n",
+               disc_index, disc_labels[disc_index]);
+    return true;
+}
+
+static bool disc_get_eject_state(void)      { return disc_ejected; }
+static unsigned disc_get_image_index(void)  { return disc_index; }
+static unsigned disc_get_num_images(void)   { return disc_count; }
+
+static bool disc_set_image_index(unsigned index)
+{
+    /* libretro requires the tray to be open for this; honouring that keeps
+     * the guest from having the medium yanked mid-read. */
+    if (!disc_ejected) {
+        LRLOG_ERROR("[xemu] Disc index change refused: tray is closed\n");
+        return false;
+    }
+    if (index >= disc_count) {
+        LRLOG_ERROR("[xemu] Disc index %u out of range (%u discs)\n",
+                    index, disc_count);
+        return false;
+    }
+    disc_index = index;
+    return true;
+}
+
+static bool disc_replace_image_index(unsigned index,
+                                     const struct retro_game_info *info)
+{
+    if (index >= disc_count) {
+        return false;
+    }
+
+    if (!info || !info->path) {
+        /* NULL removes the entry, per the libretro contract. */
+        for (unsigned i = index; i + 1 < disc_count; i++) {
+            memcpy(disc_paths[i], disc_paths[i + 1], sizeof(disc_paths[0]));
+            memcpy(disc_labels[i], disc_labels[i + 1], sizeof(disc_labels[0]));
+        }
+        disc_count--;
+        if (disc_index >= disc_count && disc_count > 0) {
+            disc_index = disc_count - 1;
+        }
+        return true;
+    }
+
+    snprintf(disc_paths[index], sizeof(disc_paths[0]), "%s", info->path);
+    disc_make_label(info->path, disc_labels[index], sizeof(disc_labels[0]));
+    return true;
+}
+
+static bool disc_add_image_index(void)
+{
+    if (disc_count >= DISC_MAX_IMAGES) {
+        return false;
+    }
+    disc_paths[disc_count][0]  = '\0';
+    disc_labels[disc_count][0] = '\0';
+    disc_count++;
+    return true;
+}
+
+static bool disc_set_initial_image(unsigned index, const char *path)
+{
+    (void)path;
+    disc_initial_image = index;
+    return true;
+}
+
+static bool disc_get_image_path(unsigned index, char *path, size_t len)
+{
+    if (index >= disc_count || !path || len == 0) {
+        return false;
+    }
+    snprintf(path, len, "%s", disc_paths[index]);
+    return true;
+}
+
+static bool disc_get_image_label(unsigned index, char *label, size_t len)
+{
+    if (index >= disc_count || !label || len == 0) {
+        return false;
+    }
+    snprintf(label, len, "%s", disc_labels[index]);
+    return true;
+}
+
+/* Register the newest interface the frontend understands. RA 1.7.5 predates
+ * the extended one, so the legacy struct is a real fallback here and not
+ * defensive padding - without it EmuVR would get no disc control at all. */
+static void register_disk_control(void)
+{
+    static const struct retro_disk_control_ext_callback ext_cb = {
+        .set_eject_state     = disc_set_eject_state,
+        .get_eject_state     = disc_get_eject_state,
+        .get_image_index     = disc_get_image_index,
+        .set_image_index     = disc_set_image_index,
+        .get_num_images      = disc_get_num_images,
+        .replace_image_index = disc_replace_image_index,
+        .add_image_index     = disc_add_image_index,
+        .set_initial_image   = disc_set_initial_image,
+        .get_image_path      = disc_get_image_path,
+        .get_image_label     = disc_get_image_label,
+    };
+    static const struct retro_disk_control_callback legacy_cb = {
+        .set_eject_state     = disc_set_eject_state,
+        .get_eject_state     = disc_get_eject_state,
+        .get_image_index     = disc_get_image_index,
+        .set_image_index     = disc_set_image_index,
+        .get_num_images      = disc_get_num_images,
+        .replace_image_index = disc_replace_image_index,
+        .add_image_index     = disc_add_image_index,
+    };
+
+    if (!environ_cb) {
+        return;
+    }
+
+    if (environ_cb(RETRO_ENVIRONMENT_SET_DISK_CONTROL_EXT_INTERFACE,
+                   (void *)&ext_cb)) {
+        LRLOG_INFO("[xemu] Disk control: extended interface\n");
+    } else if (environ_cb(RETRO_ENVIRONMENT_SET_DISK_CONTROL_INTERFACE,
+                          (void *)&legacy_cb)) {
+        LRLOG_INFO("[xemu] Disk control: legacy interface "
+                   "(no per-disc labels on this frontend)\n");
+    } else {
+        LRLOG_INFO("[xemu] Disk control unsupported by this frontend\n");
+    }
+}
+
 RETRO_API bool retro_load_game(const struct retro_game_info *game)
 {
     LRLOG_INFO("[xemu] retro_load_game called\n");
@@ -1684,8 +2076,40 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
 
     update_variables();
 
+    /* Build the disc list. An .m3u names the discs of a multi-disc title;
+     * anything else is a single disc, still published through the disk
+     * control interface so the frontend can show what is mounted. */
+    disc_count    = 0;
+    disc_index    = 0;
+    disc_ejected  = false;
+    disc_from_m3u = false;
+    {
+        size_t plen = strlen(game->path);
+        bool is_m3u = plen > 4 &&
+                      (!strcasecmp(game->path + plen - 4, ".m3u"));
+
+        if (!is_m3u || !disc_parse_m3u(game->path)) {
+            if (is_m3u) {
+                LRLOG_ERROR("[xemu] Falling back to loading the playlist "
+                            "file itself, which will not work\n");
+            }
+            disc_count = 0;
+            disc_add_entry(game->path);
+        }
+
+        if (disc_initial_image < disc_count) {
+            disc_index = disc_initial_image;
+        }
+    }
+
     /* Store the DVD path */
-    snprintf(opt_dvd_path, sizeof(opt_dvd_path), "%s", game->path);
+    snprintf(opt_dvd_path, sizeof(opt_dvd_path), "%s", disc_paths[disc_index]);
+    if (disc_count > 1) {
+        LRLOG_INFO("[xemu] Starting on disc %u: %s\n",
+                   disc_index, disc_labels[disc_index]);
+    }
+
+    register_disk_control();
 
     /* Set shader cache base path */
     if (system_dir[0]) {
