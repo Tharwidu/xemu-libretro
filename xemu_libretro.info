@@ -15,7 +15,7 @@ permissions = ""
 # (e.g. 0.2.1-12-g...), and the two silently disagreeing is worse than one of
 # them being coarse. The core logs that exact string at retro_init, so the log
 # is authoritative and this line is only a label. Bump it when cutting a tag.
-display_version = "0.2.2"
+display_version = "0.2.3"
 supports_no_game = "false"
 
 # Hardware Information
