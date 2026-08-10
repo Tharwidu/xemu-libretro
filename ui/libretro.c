@@ -284,9 +284,23 @@ struct retro_rumble_interface libretro_rumble;
  * announced at the dimensions the frontend already has. */
 static unsigned last_frame_width  = XBOX_NATIVE_WIDTH;
 static unsigned last_frame_height = XBOX_NATIVE_HEIGHT;
-#define READBACK_MAX_W 1920
-#define READBACK_MAX_H 1080
-static uint32_t readback_frame[READBACK_MAX_W * READBACK_MAX_H];
+/* Internal resolution scale.
+ *
+ * Upstream xemu offers 1x-10x (ui/xui/main-menu.cc) and this core exposes the
+ * same range, so the software readback path has to be able to carry all of it.
+ * The staging buffers are therefore sized from the scale actually in use.
+ *
+ * They used to be fixed 1920x1080 arrays. That is a 16:9 shape carrying 4:3
+ * content scaled by integer factors, so it happened to fit 2x (1280x960) and
+ * not 3x (1920x1440). A frame larger than the destination makes
+ * nv2a_*_get_display_frame() refuse it, and the caller then falls through to
+ * the VGA scanout - which is blank for a title rendering in 3D. That was the
+ * black screen at 3x and above, with audio still playing. */
+#define XEMU_MAX_SURFACE_SCALE 10
+
+static uint32_t *readback_frame = NULL;  /* staging, and row-flip scratch */
+static uint32_t *vga_stage      = NULL;  /* VGA scanout scratch (HW path) */
+static size_t    readback_capacity_px = 0;
 
 /* ------------------------------------------------------------------ *
  * Periodic runtime stats.
@@ -399,8 +413,15 @@ static void update_display_geometry(unsigned width, unsigned height)
     memset(&geom, 0, sizeof(geom));
     geom.base_width   = width;
     geom.base_height  = height;
-    geom.max_width    = READBACK_MAX_W;
-    geom.max_height   = READBACK_MAX_H;
+    /* The ceiling the configured scale can actually produce. This was a fixed
+     * 1920x1080, which is SMALLER than base_* above 2x - at 10x it claimed a
+     * 1920x1080 maximum for a 6400x4800 frame. base > max is not a valid
+     * geometry; RetroArch tolerates it, another frontend need not. */
+    unsigned geo_scale = (unsigned)(opt_surface_scale > 0 ? opt_surface_scale : 1);
+    geom.max_width    = XBOX_NATIVE_WIDTH  * geo_scale;
+    geom.max_height   = XBOX_NATIVE_HEIGHT * geo_scale;
+    if (geom.max_width  < width)  geom.max_width  = width;
+    if (geom.max_height < height) geom.max_height = height;
     geom.aspect_ratio = aspect;
 
     if (!environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geom)) {
@@ -1055,45 +1076,93 @@ static void show_user_message(const char *text)
     }
 }
 
-/* Largest internal-resolution scale the software readback staging buffer can
- * carry, and the clamp that keeps an over-large setting from degrading to the
- * VGA fallback.
+/* Size the software readback staging buffers for `scale`.
  *
- * Both nv2a_gl_get_display_frame() and its Vulkan twin refuse a frame larger
- * than the destination capacity (w * h > dst_cap_pixels -> false), and the
- * caller then falls through to the VGA scanout surface - so an over-large
- * scale did not merely fail to scale, it presented the wrong image. At the
- * Xbox's 640x480 the cliff is scale 3 (1920x1440 = 2.76 Mpx against a
- * 2.07 Mpx buffer).
- *
- * The hardware (FBO) path stages nothing and keeps the full range.
- *
- * `announce` exists so the warning is emitted once at load rather than on
- * every option-change callback. */
-static int clamp_scale_for_frame_output(int scale, bool announce)
+ * Both buffers are needed: readback_frame receives the display frame (and
+ * doubles as the row-flip scratch on the hardware VGA path), vga_stage
+ * receives the VGA scanout before flipping. Returns false only if the host
+ * refused the allocation, in which case whatever capacity already existed is
+ * left untouched. */
+static bool ensure_readback_capacity(unsigned scale)
 {
-    unsigned max_scale = 1;
+    if (scale < 1) scale = 1;
+    if (scale > XEMU_MAX_SURFACE_SCALE) scale = XEMU_MAX_SURFACE_SCALE;
+
+    const unsigned w    = XBOX_NATIVE_WIDTH  * scale;
+    const unsigned h    = XBOX_NATIVE_HEIGHT * scale;
+    const size_t   want = (size_t)w * (size_t)h;
+
+    if (readback_frame && vga_stage && readback_capacity_px >= want) {
+        return true;
+    }
+
+    uint32_t *frame = (uint32_t *)calloc(want, sizeof(uint32_t));
+    uint32_t *stage = (uint32_t *)calloc(want, sizeof(uint32_t));
+    if (!frame || !stage) {
+        free(frame);
+        free(stage);
+        LRLOG_WARN("[xemu] Could not allocate %ux%u readback staging "
+                   "(%.1f MB x2) for scale %ux; keeping the previous size.\n",
+                   w, h,
+                   (double)(want * sizeof(uint32_t)) / (1024.0 * 1024.0),
+                   scale);
+        return false;
+    }
+
+    free(readback_frame);
+    free(vga_stage);
+    readback_frame       = frame;
+    vga_stage            = stage;
+    readback_capacity_px = want;
+
+    LRLOG_INFO("[xemu] Readback staging: %ux%u, %.1f MB x2 (scale %ux)\n",
+               w, h, (double)(want * sizeof(uint32_t)) / (1024.0 * 1024.0),
+               scale);
+    return true;
+}
+
+static void free_readback_buffers(void)
+{
+    free(readback_frame);
+    free(vga_stage);
+    readback_frame       = NULL;
+    vga_stage            = NULL;
+    readback_capacity_px = 0;
+}
+
+/* Give the requested scale the memory it needs, stepping down only when the
+ * host will not provide it. The old behaviour capped software readback at 2x
+ * regardless of what was asked for; upstream xemu allows 1x-10x and so does
+ * this core now. High scales are expensive, not unsupported - 10x stages
+ * 6400x4800, which is 123 MB per buffer.
+ *
+ * `announce` keeps the warning to once at load rather than on every
+ * option-change callback. */
+static int fit_scale_to_memory(int scale, bool announce)
+{
+    int s = scale;
+
+    if (s < 1) s = 1;
+    if (s > XEMU_MAX_SURFACE_SCALE) s = XEMU_MAX_SURFACE_SCALE;
 
     if (!frame_readback) {
-        return scale;
+        /* The hardware path stages nothing, but readback_frame is still used
+         * as the VGA row-flip scratch, so it must exist at native size. */
+        ensure_readback_capacity(1);
+        return s;
     }
 
-    while ((max_scale + 1) * XBOX_NATIVE_WIDTH *
-           (max_scale + 1) * XBOX_NATIVE_HEIGHT <=
-           (unsigned)(READBACK_MAX_W * READBACK_MAX_H)) {
-        max_scale++;
-    }
-
-    if (scale > (int)max_scale) {
+    while (s > 1 && !ensure_readback_capacity((unsigned)s)) {
         if (announce) {
-            LRLOG_WARN("[xemu] Internal Resolution Scale %dx exceeds the "
-                       "software readback buffer (%dx%d); using %ux. Use "
-                       "Hardware (FBO) frame output for higher scales.\n",
-                       scale, READBACK_MAX_W, READBACK_MAX_H, max_scale);
+            LRLOG_WARN("[xemu] Internal Resolution Scale %dx did not fit in "
+                       "host memory; falling back to %dx.\n", s, s - 1);
         }
-        return (int)max_scale;
+        s--;
     }
-    return scale;
+    if (s == 1) {
+        ensure_readback_capacity(1);
+    }
+    return s;
 }
 
 static void update_variables(void)
@@ -1265,9 +1334,26 @@ static void update_variables(void)
     /* Apply runtime-safe options */
     if (emu_initialized) {
         g_config.audio.volume_limit = opt_audio_volume / 100.0f;
-        /* Silent here: the reason was already logged once at load. */
-        g_config.display.quality.surface_scale =
-            clamp_scale_for_frame_output(opt_surface_scale, false);
+        /* Silent here: any warning was already logged once at load. Only
+         * raise the live scale once the staging buffers can carry it -
+         * otherwise the renderer would produce frames the readback path has
+         * to refuse, which is the VGA-fallback black screen. Note the
+         * frontend's own framebuffer ceiling comes from retro_get_system_av_
+         * info() and is fixed at load, so a scale change is only fully
+         * applied after the content is reloaded. */
+        const size_t need = (size_t)XBOX_NATIVE_WIDTH  * opt_surface_scale *
+                            (size_t)XBOX_NATIVE_HEIGHT * opt_surface_scale;
+        if (!frame_readback || readback_capacity_px >= need) {
+            g_config.display.quality.surface_scale = opt_surface_scale;
+        }
+        /* Deliberately does NOT grow the staging buffers here. They are only
+         * sized in retro_load_game, on one thread, before the renderer is
+         * running - the Vulkan capture fills readback_frame off the back of
+         * the emulation thread, so freeing and replacing it mid-run would be
+         * a race on the payload. Raising the scale beyond the current
+         * capacity therefore waits for a content reload, which is needed
+         * regardless: the frontend's framebuffer ceiling comes from
+         * retro_get_system_av_info() and is fixed at load. */
         g_config.perf.cache_shaders = opt_cache_shaders;
         g_config.audio.use_dsp = opt_use_dsp;
     }
@@ -1672,6 +1758,9 @@ RETRO_API void retro_deinit(void)
     emu_initialized = false;
     context_ready = false;
     use_vulkan = false;
+    /* The staging buffers scale with the internal resolution - up to 123 MB
+     * each at 10x - so they are released here rather than left resident. */
+    free_readback_buffers();
 }
 
 /* Log the md5 of a system file and note whether it matches a known-good
@@ -2399,7 +2488,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
 
     /* frame_readback is now known, so the internal-resolution scale can be
      * held to what this frame path can actually stage. See the helper. */
-    opt_surface_scale = clamp_scale_for_frame_output(opt_surface_scale, true);
+    opt_surface_scale = fit_scale_to_memory(opt_surface_scale, true);
     LRLOG_INFO("[xemu] Internal resolution scale: %dx\n", opt_surface_scale);
 
     /* Query the frontend's preferred HW render context */
@@ -2927,8 +3016,15 @@ RETRO_API void retro_run(void)
     if (!emu_initialized || !context_ready) {
         /* Emulator not ready yet, draw black frame */
         if (frame_readback) {
-            /* readback_frame is zero-initialized = black */
-            video_cb(readback_frame, 640, 480, 640 * sizeof(uint32_t));
+            /* calloc'd, so the staging buffer is already black. It is
+             * allocated in retro_load_game before any retro_run, but guard
+             * anyway rather than hand video_cb a null pointer. */
+            if (readback_frame) {
+                video_cb(readback_frame, XBOX_NATIVE_WIDTH, XBOX_NATIVE_HEIGHT,
+                         XBOX_NATIVE_WIDTH * sizeof(uint32_t));
+            } else {
+                video_cb(NULL, last_frame_width, last_frame_height, 0);
+            }
         } else if (!use_vulkan && hw_render.get_current_framebuffer) {
             uintptr_t fbo = hw_render.get_current_framebuffer();
             glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)fbo);
@@ -3018,11 +3114,11 @@ RETRO_API void retro_run(void)
              * of render_display, so there is no surface handle to check
              * first - a frame is either ready or it is not. */
             got = nv2a_vk_get_display_frame(readback_frame,
-                                            READBACK_MAX_W * READBACK_MAX_H,
+                                            readback_capacity_px,
                                             &w, &h);
         } else if (pg_tex) {
             got = nv2a_gl_get_display_frame(readback_frame,
-                                            READBACK_MAX_W * READBACK_MAX_H,
+                                            readback_capacity_px,
                                             &w, &h);
         }
 
@@ -3031,7 +3127,7 @@ RETRO_API void retro_run(void)
              * scanout surface — verbatim upstream xemu's fallback. */
             int vw = 0, vh = 0;
             if (libretro_get_vga_frame(readback_frame,
-                                       READBACK_MAX_W * READBACK_MAX_H,
+                                       readback_capacity_px,
                                        &vw, &vh)) {
                 w = vw;
                 h = vh;
@@ -3109,9 +3205,8 @@ readback_done:
              * Rows are flipped to match the blit's texture conventions. */
             int vw = 0, vh = 0;
             static GLuint vga_tex;
-            static uint32_t vga_stage[READBACK_MAX_W * READBACK_MAX_H];
-            if (libretro_get_vga_frame(vga_stage,
-                                       READBACK_MAX_W * READBACK_MAX_H,
+            if (vga_stage && libretro_get_vga_frame(vga_stage,
+                                       readback_capacity_px,
                                        &vw, &vh)) {
                 for (int y = 0; y < vh; y++) {
                     memcpy(readback_frame + (size_t)(vh - 1 - y) * vw,

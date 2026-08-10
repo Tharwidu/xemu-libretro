@@ -102,7 +102,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         "xemu_surface_scale",
         "Internal Resolution Scale",
         NULL,
-        "Scales the internal rendering resolution. Higher values improve quality but reduce performance. In Software (readback) frame output - the default, and what EmuVR uses - the frame is staged through a fixed 1920x1080 buffer, so the scale is capped at 2x there and the log says when that happens. Hardware (FBO) frame output has no such limit.",
+        "Scales the internal rendering resolution, the same 1x-10x range standalone xemu offers. Higher values improve quality and cost performance and memory - the frame is staged at the scaled size, so 10x means a 6400x4800 buffer. Takes effect when content is loaded: change it, then reload the game. If a high setting is too slow on your machine, set it back down; 1x is the default.",
         NULL,
         "video",
         {
