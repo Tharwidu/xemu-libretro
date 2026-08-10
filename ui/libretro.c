@@ -1088,9 +1088,18 @@ static bool ensure_readback_capacity(unsigned scale)
     if (scale < 1) scale = 1;
     if (scale > XEMU_MAX_SURFACE_SCALE) scale = XEMU_MAX_SURFACE_SCALE;
 
-    const unsigned w    = XBOX_NATIVE_WIDTH  * scale;
-    const unsigned h    = XBOX_NATIVE_HEIGHT * scale;
-    const size_t   want = (size_t)w * (size_t)h;
+    const unsigned w = XBOX_NATIVE_WIDTH  * scale;
+    const unsigned h = XBOX_NATIVE_HEIGHT * scale;
+
+    /* Floor at the largest VGA scanout an AV pack can produce (1080i). Both
+     * buffers double as the VGA fallback path's staging and row-flip scratch,
+     * and that surface is independent of the 3D surface scale - at 1x a
+     * 640x480 buffer would make libretro_get_vga_frame() refuse any 720p or
+     * 1080i scanout for want of room, losing the boot and dashboard screens
+     * that path exists to show. */
+    const size_t   scaled = (size_t)w * (size_t)h;
+    const size_t   vga_floor = (size_t)1920 * 1080;
+    const size_t   want   = scaled > vga_floor ? scaled : vga_floor;
 
     if (readback_frame && vga_stage && readback_capacity_px >= want) {
         return true;
@@ -1115,9 +1124,9 @@ static bool ensure_readback_capacity(unsigned scale)
     vga_stage            = stage;
     readback_capacity_px = want;
 
-    LRLOG_INFO("[xemu] Readback staging: %ux%u, %.1f MB x2 (scale %ux)\n",
-               w, h, (double)(want * sizeof(uint32_t)) / (1024.0 * 1024.0),
-               scale);
+    LRLOG_INFO("[xemu] Readback staging: %.1f MB x2, holds %ux%u%s\n",
+               (double)(want * sizeof(uint32_t)) / (1024.0 * 1024.0), w, h,
+               scaled < vga_floor ? " (raised to the VGA scanout floor)" : "");
     return true;
 }
 
@@ -1146,9 +1155,13 @@ static int fit_scale_to_memory(int scale, bool announce)
     if (s > XEMU_MAX_SURFACE_SCALE) s = XEMU_MAX_SURFACE_SCALE;
 
     if (!frame_readback) {
-        /* The hardware path stages nothing, but readback_frame is still used
-         * as the VGA row-flip scratch, so it must exist at native size. */
+        /* The hardware path stages no 3D frame, so the scale costs it nothing
+         * in host memory. The buffers are still needed as the VGA fallback's
+         * staging and row-flip scratch, which ensure_readback_capacity()
+         * floors at the largest scanout an AV pack can produce. */
         ensure_readback_capacity(1);
+        LRLOG_INFO("[xemu] Hardware frame output: scale %dx is rendered on the "
+                   "GPU, no host staging needed\n", s);
         return s;
     }
 
