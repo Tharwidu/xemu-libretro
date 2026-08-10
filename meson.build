@@ -2471,6 +2471,14 @@ endif
 if host_os == 'windows'
   libpcap = declare_dependency(include_directories: 'winpcap-loader/include',
                                link_args: ['-lws2_32'])
+elif get_option('libretro')
+  # Take libpcap's headers but NOT its link line: winpcap-loader/loader_posix.c
+  # resolves the library at runtime instead. Distributions disagree on the
+  # soname (libpcap.so.0.8 on Debian/Ubuntu, libpcap.so.1 on Fedora/RHEL), so a
+  # core linked on one will not load at all on the other. See that file.
+  libpcap_headers = dependency('libpcap', method: 'pkg-config', required: true)
+  libpcap = libpcap_headers.partial_dependency(compile_args: true,
+                                               includes: true)
 else
   libpcap = dependency('libpcap', method: 'pkg-config', required: true)
 endif
