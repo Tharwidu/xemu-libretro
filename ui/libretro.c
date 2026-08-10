@@ -1393,9 +1393,11 @@ static void populate_config(const char *dvd_path)
     if (opt_eeprom_path[0]) {
         xemu_settings_set_string(&g_config.sys.files.eeprom_path, opt_eeprom_path);
     }
-    if (dvd_path && dvd_path[0]) {
-        xemu_settings_set_string(&g_config.sys.files.dvd_path, dvd_path);
-    }
+    /* Always set this, including for an empty tray. Standalone xemu sets ""
+     * when no disc is mounted (ui/xemu.c:1383) and the startup path expects a
+     * string; leaving it NULL segfaults during machine init. */
+    xemu_settings_set_string(&g_config.sys.files.dvd_path,
+                             (dvd_path && dvd_path[0]) ? dvd_path : "");
 
     /* Set renderer */
     if (use_vulkan) {
@@ -1610,8 +1612,9 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
         LRLOG_WARN("[xemu] Could not get system directory\n");
     }
 
-    /* We need content (game ISO) */
-    bool no_game = false;
+    /* Content is optional: with none, the tray is empty and the console
+     * boots the hard disk's dashboard. See retro_load_game(). */
+    bool no_game = true;
     environ_cb(RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME, &no_game);
 
 
@@ -2177,12 +2180,20 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
 {
     LRLOG_INFO("[xemu] retro_load_game called\n");
 
-    if (!game || !game->path) {
-        LRLOG_ERROR("[xemu] No game path provided\n");
-        return false;
-    }
+    /* Starting with no content is a supported entry point, not an error: the
+     * tray comes up empty and the BIOS boots whatever is installed on the
+     * hard disk, which is how you reach the Xbox dashboard. It needs a
+     * dashboard on the HDD image - the blank image xemu ships has none, since
+     * the dashboard is Microsoft's and has to be installed from a retail disc
+     * exactly as on real hardware. */
+    const bool boot_no_disc = (!game || !game->path || !game->path[0]);
 
-    LRLOG_INFO("[xemu] Loading game: %s\n", game->path);
+    if (boot_no_disc) {
+        LRLOG_INFO("[xemu] No content: booting with an empty tray "
+                   "(the HDD's dashboard, if one is installed)\n");
+    } else {
+        LRLOG_INFO("[xemu] Loading game: %s\n", game->path);
+    }
 
     /* Read core options */
     probe_frontend_caps();
@@ -2196,7 +2207,8 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
     disc_index    = 0;
     disc_ejected  = false;
     disc_from_m3u = false;
-    {
+    opt_dvd_path[0] = '\0';
+    if (!boot_no_disc) {
         size_t plen = strlen(game->path);
         bool is_m3u = plen > 4 &&
                       (!strcasecmp(game->path + plen - 4, ".m3u"));
@@ -2213,16 +2225,20 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
         if (disc_initial_image < disc_count) {
             disc_index = disc_initial_image;
         }
-    }
 
-    /* Store the DVD path */
-    snprintf(opt_dvd_path, sizeof(opt_dvd_path), "%s", disc_paths[disc_index]);
-    if (disc_count > 1) {
-        LRLOG_INFO("[xemu] Starting on disc %u: %s\n",
-                   disc_index, disc_labels[disc_index]);
-    }
+        /* Store the DVD path */
+        snprintf(opt_dvd_path, sizeof(opt_dvd_path), "%s",
+                 disc_paths[disc_index]);
+        if (disc_count > 1) {
+            LRLOG_INFO("[xemu] Starting on disc %u: %s\n",
+                       disc_index, disc_labels[disc_index]);
+        }
 
-    register_disk_control();
+        /* An empty tray has nothing to swap, so the disk control interface is
+         * only published when there is a disc. populate_config() leaves
+         * g_config.sys.files.dvd_path unset for an empty opt_dvd_path. */
+        register_disk_control();
+    }
 
     /* Set shader cache base path */
     if (system_dir[0]) {
@@ -2429,7 +2445,10 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
          * Probe the disc actually mounted, not game->path: for a playlist
          * those differ, and probing the .m3u told every multi-disc user their
          * content was not an xiso - on the OSD, every launch. */
-        f = fopen(disc_paths[disc_index], "rb");
+        /* Nothing is mounted on a dashboard boot, and disc_paths[] may still
+         * hold the previous session's path - probing it would warn about
+         * content this run never loaded. */
+        f = boot_no_disc ? NULL : fopen(disc_paths[disc_index], "rb");
         if (f) {
             static const char xiso_magic[] = "MICROSOFT*XBOX*MEDIA";
             static const int64_t offsets[] = { 0x10000, 0x18310000 };
@@ -2454,7 +2473,13 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
 
     /* Per-content snapshot name: save states live as snapshots inside the
      * shared HDD image, so they must not collide across games. */
-    {
+    if (boot_no_disc) {
+        /* Save states are snapshots inside the shared HDD image and are keyed
+         * by content; a dashboard session has none, so give it its own slot
+         * rather than colliding with whichever game ran last. */
+        snprintf(snapshot_name, sizeof(snapshot_name), "lr-dashboard");
+        LRLOG_INFO("[xemu] Save-state snapshot name: %s\n", snapshot_name);
+    } else {
         const char *base = strrchr(game->path, '/');
 #ifdef _WIN32
         const char *bs = strrchr(game->path, '\\');
