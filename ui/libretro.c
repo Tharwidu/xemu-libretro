@@ -1412,7 +1412,7 @@ static void populate_config(const char *dvd_path)
     /* Upstream defaults that the settings stub does not apply (g_config
      * is zero-initialized here; keep in sync with config_spec.yml).
      * Fields covered by core options are set below instead. */
-    g_config.audio.use_dsp_jit = true;
+    g_config.audio.use_dsp_jit = false;
     g_config.audio.hrtf = true;
 
     /* Critical defaults for libretro mode */
