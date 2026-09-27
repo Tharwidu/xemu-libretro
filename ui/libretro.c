@@ -1058,14 +1058,6 @@ static void context_destroy(void)
 /* Core option helpers                                                       */
 /* ========================================================================= */
 
-static void get_option_string(const char *key, char *buf, size_t buf_sz)
-{
-    struct retro_variable var = { key, NULL };
-    if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
-        snprintf(buf, buf_sz, "%s", var.value);
-    }
-}
-
 /* Surface fatal setup problems in the frontend's OSD, not just the log. */
 static void show_user_message(const char *text)
 {
@@ -1182,18 +1174,11 @@ static void update_variables(void)
 {
     struct retro_variable var;
 
-    /* Optional path overrides. These are plain config variables, not
-     * registered options (frontends have no path-typed option UI), so
-     * probe them once to keep frontends from logging unknown-variable
-     * errors on every option change. */
-    static bool paths_probed;
-    if (!paths_probed) {
-        paths_probed = true;
-        get_option_string("xemu_bootrom_path", opt_bootrom_path, sizeof(opt_bootrom_path));
-        get_option_string("xemu_bios_path", opt_bios_path, sizeof(opt_bios_path));
-        get_option_string("xemu_hdd_path", opt_hdd_path, sizeof(opt_hdd_path));
-        get_option_string("xemu_eeprom_path", opt_eeprom_path, sizeof(opt_eeprom_path));
-    }
+    /* The firmware/HDD paths are not queried: they are not registered
+     * options (frontends have no path-typed option UI), and RetroArch never
+     * returns an unregistered key - it only logs "[ERROR] GET_VARIABLE ...
+     * Invalid value", which reads as a failure. They are found in the
+     * system directory at load instead. */
 
     var.key = "xemu_memory";
     var.value = NULL;
