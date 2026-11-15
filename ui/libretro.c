@@ -65,7 +65,7 @@ static retro_audio_sample_t       audio_cb     = NULL;
 static retro_audio_sample_batch_t audio_batch_cb = NULL;
 /* Audio > Audio Thread: taken at load; whether RetroArch then calls
  * audio_thread_callback on its audio thread (SET_AUDIO_CALLBACK) */
-static bool opt_audio_thread = true;
+static bool opt_audio_thread = false;
 static bool audio_async = false;
 static bool audio_async_enabled = false;
 static retro_input_poll_t         input_poll_cb  = NULL;
@@ -108,7 +108,7 @@ static struct retro_rumble_interface rumble;
 static bool opt_renderer_vulkan = true;
 /* Frame Output: Software. The option as read, and what the machine was
  * started with (it keeps that until RetroArch is restarted). */
-static bool opt_frame_software = false;
+static bool opt_frame_software = true;
 static bool frame_software = false;
 static bool context_ready = false;
 static bool game_loaded = false;

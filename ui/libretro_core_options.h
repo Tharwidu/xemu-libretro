@@ -225,11 +225,11 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         },
         "vulkan"
     },
-    /* Hardware by default, the way every frontend that can show hardware
-     * frames gets them without a copy. Software exists for frontends that
-     * cannot: EmuVR's RetroArch 1.7.5 has no Vulkan, and with the OpenGL
-     * renderer on contexts shared with it, Halo 2 ran at about 4.5 fps
-     * inside EmuVR against 30 on contexts of the core's own. */
+    /* Software by default in this fork, which is built for EmuVR: its
+     * RetroArch 1.7.5 has no Vulkan, and with the OpenGL renderer on contexts
+     * shared with it, Halo 2 ran at about 4.5 fps inside EmuVR against 30 on
+     * contexts of the core's own. Upstream's default is Hardware, the way a
+     * frontend that can show hardware frames gets them without a copy. */
     {
         "xemu_frame_output",
         "Frame Output (Restart)",
@@ -242,7 +242,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
             { "software", "Software" },
             { NULL, NULL },
         },
-        "hardware"
+        "software"
     },
     /* 16:9 by default, unlike standalone's dashboard setting: the core is for
      * computers, whose displays are 16:9 nearly always, and no one should
@@ -366,11 +366,13 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         },
         "hdtv"
     },
-    /* On by default: the sound keeps its pace while shaders compile, as
-     * standalone's own SDL thread keeps it (NNshi, OutRun 2 from a cold
-     * shader cache); fast-forward and slow motion do not change the game's
-     * speed in the core either way, and on this thread they leave the sound
-     * clean rather than garbled */
+    /* Off by default in this fork: on EmuVR's RetroArch 1.7.5 Halo 2's menus
+     * fell back to the intro within two seconds with it on (buildbot build
+     * of 2026-11-03), and held with it off. Upstream has it on: the sound
+     * keeps its pace while shaders compile, as standalone's own SDL thread
+     * keeps it (NNshi, OutRun 2 from a cold shader cache); fast-forward and
+     * slow motion do not change the game's speed in the core either way, and
+     * on this thread they leave the sound clean rather than garbled */
     {
         "xemu_audio_thread",
         "Audio Thread (Restart)",
@@ -383,7 +385,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
             { "enabled",  "Enabled" },
             { NULL, NULL },
         },
-        "enabled"
+        "disabled"
     },
     {
         "xemu_use_dsp",
