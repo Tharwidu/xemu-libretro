@@ -85,6 +85,15 @@ bool nv2a_vk_libretro_get_frame(int index, VkImage *image, VkImageView *view,
                                 VkFormat *format, int *width, int *height,
                                 uint64_t *count);
 
+/* Frame Output: Software on Vulkan (pgraph/vk/display.c). Enabled before
+ * the machine starts, the renderer is on a device of its own and copies each
+ * display render into memory. read_frame hands over the latest one as
+ * XRGB8888, top row first, when it is another than the one *count names;
+ * false when there is no newer frame or it does not fit dst. */
+void nv2a_vk_libretro_readback_enable(void);
+bool nv2a_vk_libretro_read_frame(uint32_t *dst, size_t dst_px, int *width,
+                                 int *height, uint64_t *count);
+
 #endif /* LIBRETRO */
 
 #endif

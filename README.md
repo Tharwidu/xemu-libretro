@@ -60,7 +60,7 @@ A Chihiro driving game that stops at a drive board calibration error: the left s
 
 ## Video
 
-The core renders with OpenGL or Vulkan, whichever RetroArch's video driver is (`glcore` or `vulkan`). With the core option Frame Output on Software it renders with OpenGL on contexts of its own and hands RetroArch plain frames, with any video driver; that is the setting for EmuVR, whose RetroArch 1.7.5 has no Vulkan. On Android it is Vulkan only. On macOS it is OpenGL: MoltenVK has no geometry shaders, which xemu's Vulkan renderer needs, so use RetroArch's `glcore` driver there.
+The core renders with OpenGL or Vulkan, whichever RetroArch's video driver is (`glcore` or `vulkan`). With the core option Frame Output on Software it renders on a Vulkan device or OpenGL contexts of its own, whichever Graphics API says, and hands RetroArch plain frames, with any video driver; that is the setting for EmuVR, whose RetroArch 1.7.5 has no Vulkan. On Android it is Vulkan only. On macOS it is OpenGL: MoltenVK has no geometry shaders, which xemu's Vulkan renderer needs, so use RetroArch's `glcore` driver there.
 
 ## Building
 

@@ -35,6 +35,25 @@ static inline bool on_frontend_device(void)
 #endif
 }
 
+#ifdef LIBRETRO
+/* Frame Output: Software (the read-back further down): set before the
+ * machine starts */
+static bool libretro_readback;
+#endif
+
+/* The display image is exported, to GL or to a second device. Not on the
+ * frontend's device, and not when the frame is read back into memory: there
+ * it is a plain image too, and nothing of GL's memory objects is used (wine
+ * has no GL_EXT_memory_object_win32). */
+static inline bool display_exported(void)
+{
+#ifdef LIBRETRO
+    return !xemu_libretro_vk.active && !libretro_readback;
+#else
+    return true;
+#endif
+}
+
 static uint8_t *convert_texture_data__CR8YB8CB8YA8(uint8_t *data_out,
                                                    const uint8_t *data_in,
                                                    unsigned int width,
@@ -664,7 +683,7 @@ static void destroy_current_display_image(PGRAPHState *pg)
     destroy_frame_buffer(pg);
 
 #if HAVE_EXTERNAL_MEMORY
-    if (!on_frontend_device()) {
+    if (display_exported()) {
     glDeleteTextures(1, &d->gl_texture_id);
     d->gl_texture_id = 0;
 
@@ -712,7 +731,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
     bool use_optimal_tiling = true;
 
 #if HAVE_EXTERNAL_MEMORY
-    if (!on_frontend_device()) {
+    if (display_exported()) {
     GLint num_tiling_types;
     glGetInternalformativ(GL_TEXTURE_2D, gl_internal_format,
                           GL_NUM_TILING_TYPES_EXT, 1, &num_tiling_types);
@@ -762,7 +781,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
         .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT_KHR,
 #endif
     };
-    if (!on_frontend_device()) {
+    if (display_exported()) {
         image_create_info.pNext = &external_memory_image_create_info;
     }
 
@@ -790,7 +809,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
 #endif
             ,
     };
-    if (!on_frontend_device()) {
+    if (display_exported()) {
         alloc_info.pNext = &export_memory_alloc_info;
     }
 
@@ -811,7 +830,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
                                &d->image_view));
 
 #if HAVE_EXTERNAL_MEMORY
-    if (!on_frontend_device()) {
+    if (display_exported()) {
 
 #ifdef WIN32
 
@@ -1398,6 +1417,159 @@ static void destroy_frame_images(PGRAPHState *pg)
 }
 #endif /* LIBRETRO */
 
+#ifdef LIBRETRO
+/* Frame Output: Software on Vulkan. The renderer is on a device of its own,
+ * not the frontend's; each display render is also copied into a host buffer
+ * and, once the GPU has finished it, converted into a frame the frontend's
+ * thread takes as plain pixels (nv2a_vk_libretro_read_frame). */
+static struct {
+    bool enabled;
+    QemuMutex lock;
+    VkBuffer buffer;
+    VmaAllocation allocation;
+    void *mapped;
+    VkDeviceSize size;
+    int rec_width, rec_height;  /* of the copy recorded in this render */
+    uint32_t *pixels;           /* XRGB8888, top row first; lock held */
+    size_t pixels_px;
+    int width, height;
+    uint64_t count;
+} lr_readback;
+
+void nv2a_vk_libretro_readback_enable(void)
+{
+    if (!lr_readback.enabled) {
+        qemu_mutex_init(&lr_readback.lock);
+        lr_readback.enabled = true;
+        libretro_readback = true;
+    }
+}
+
+bool nv2a_vk_libretro_read_frame(uint32_t *dst, size_t dst_px, int *width,
+                                 int *height, uint64_t *count)
+{
+    bool got = false;
+
+    if (!lr_readback.enabled) {
+        return false;
+    }
+    qemu_mutex_lock(&lr_readback.lock);
+    const size_t px = (size_t)lr_readback.width * lr_readback.height;
+    if (lr_readback.count != *count && px > 0 && px <= dst_px) {
+        memcpy(dst, lr_readback.pixels, px * sizeof(uint32_t));
+        *width = lr_readback.width;
+        *height = lr_readback.height;
+        *count = lr_readback.count;
+        got = true;
+    }
+    qemu_mutex_unlock(&lr_readback.lock);
+    return got;
+}
+
+static void destroy_readback_buffer(PGRAPHVkState *r)
+{
+    if (lr_readback.buffer != VK_NULL_HANDLE) {
+        vmaDestroyBuffer(r->allocator, lr_readback.buffer,
+                         lr_readback.allocation);
+        lr_readback.buffer = VK_NULL_HANDLE;
+        lr_readback.allocation = VK_NULL_HANDLE;
+        lr_readback.mapped = NULL;
+        lr_readback.size = 0;
+    }
+}
+
+/* In the display render's command buffer, the display image in
+ * SHADER_READ_ONLY_OPTIMAL before and after. */
+static void readback_record(PGRAPHState *pg, VkCommandBuffer cmd)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    PGRAPHVkDisplayState *disp = &r->display;
+    const VkDeviceSize need =
+        (VkDeviceSize)disp->width * disp->height * sizeof(uint32_t);
+
+    if (lr_readback.size < need) {
+        destroy_readback_buffer(r);
+        VkBufferCreateInfo buffer_info = {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size = need,
+            .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        };
+        VmaAllocationCreateInfo alloc_info = {
+            .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+            .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
+                     VMA_ALLOCATION_CREATE_MAPPED_BIT,
+        };
+        VmaAllocationInfo info;
+        VK_CHECK(vmaCreateBuffer(r->allocator, &buffer_info, &alloc_info,
+                                 &lr_readback.buffer, &lr_readback.allocation,
+                                 &info));
+        lr_readback.mapped = info.pMappedData;
+        lr_readback.size = need;
+    }
+
+    frame_image_barrier(cmd, disp->image,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                        VK_ACCESS_TRANSFER_READ_BIT,
+                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT);
+    VkBufferImageCopy region = {
+        .imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .imageSubresource.layerCount = 1,
+        .imageExtent.width = disp->width,
+        .imageExtent.height = disp->height,
+        .imageExtent.depth = 1,
+    };
+    vkCmdCopyImageToBuffer(cmd, disp->image,
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           lr_readback.buffer, 1, &region);
+    frame_image_barrier(cmd, disp->image,
+                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_ACCESS_TRANSFER_READ_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    lr_readback.rec_width = disp->width;
+    lr_readback.rec_height = disp->height;
+}
+
+/* After the display render's command buffer has been waited for
+ * (pgraph_vk_end_single_time_commands): the buffer holds the frame, RGBA
+ * bytes, top row first. */
+static void readback_publish(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    const int w = lr_readback.rec_width, h = lr_readback.rec_height;
+    const size_t px = (size_t)w * h;
+
+    if (!lr_readback.mapped || px == 0) {
+        return;
+    }
+    vmaInvalidateAllocation(r->allocator, lr_readback.allocation, 0,
+                            VK_WHOLE_SIZE);
+    qemu_mutex_lock(&lr_readback.lock);
+    if (lr_readback.pixels_px < px) {
+        g_free(lr_readback.pixels);
+        lr_readback.pixels = g_malloc(px * sizeof(uint32_t));
+        lr_readback.pixels_px = px;
+    }
+    const uint32_t *src = lr_readback.mapped;
+    uint32_t *dst = lr_readback.pixels;
+    for (size_t i = 0; i < px; i++) {
+        /* R,G,B,A bytes to XRGB8888: red and blue change places */
+        const uint32_t v = le32_to_cpu(src[i]);
+        dst[i] = (v & 0x0000ff00) | ((v & 0xff) << 16) | ((v >> 16) & 0xff);
+    }
+    lr_readback.width = w;
+    lr_readback.height = h;
+    lr_readback.count++;
+    qemu_mutex_unlock(&lr_readback.lock);
+}
+#endif /* LIBRETRO */
+
 static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
 {
     NV2AState *d = container_of(pg, NV2AState, pgraph);
@@ -1514,12 +1686,19 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
         }
         disp->last_surface_addr = surface->vram_addr;
         copy_display_to_frame(pg, cmd);
+    } else if (lr_readback.enabled) {
+        readback_record(pg, cmd);
     }
 #endif
 
     pgraph_vk_end_debug_marker(r, cmd);
     pgraph_vk_end_single_time_commands(pg, cmd);
     nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_5);
+#ifdef LIBRETRO
+    if (!on_frontend_device() && lr_readback.enabled) {
+        readback_publish(pg);
+    }
+#endif
 
     disp->draw_time = surface->draw_time;
 }
@@ -1578,6 +1757,7 @@ void pgraph_vk_finalize_display(PGRAPHState *pg)
 #ifdef LIBRETRO
     destroy_frame_images(pg);
     destroy_crosshair_buffer(pg->vk_renderer_state);
+    destroy_readback_buffer(pg->vk_renderer_state);
 #endif
 
     destroy_surface_sampler(pg);

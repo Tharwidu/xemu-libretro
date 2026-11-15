@@ -234,7 +234,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         "xemu_frame_output",
         "Frame Output (Restart)",
         NULL,
-        "How frames reach the frontend. Hardware hands RetroArch the rendered frame on the GPU, on its own OpenGL context or Vulkan device. Software renders with OpenGL on contexts of the core's own and hands RetroArch each frame as plain pixels in memory, one frame later; it needs no hardware context from the frontend, so it works with any video driver, and it is the one to use in EmuVR. With Software the Graphics API option is not used, and the light gun crosshairs and the Performance Overlay are not drawn. Takes effect after RetroArch is restarted.",
+        "How frames reach the frontend. Hardware hands RetroArch the rendered frame on the GPU, on its own OpenGL context or Vulkan device. Software renders on a Vulkan device or OpenGL contexts of the core's own, whichever Graphics API says, and hands RetroArch each frame as plain pixels in memory; it needs no hardware context from the frontend, so it works with any video driver, and it is the one to use in EmuVR. With Software the light gun crosshairs and the Performance Overlay are not drawn. Takes effect after RetroArch is restarted.",
         NULL,
         "video",
         {

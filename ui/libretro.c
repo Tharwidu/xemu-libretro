@@ -3940,8 +3940,15 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
     }
 #endif
     if (frame_software) {
-        LRLOG_INFO("[xemu] Frame output: software (OpenGL on the core's own contexts, frames in memory)\n");
-        use_vulkan = false;
+        /* The Graphics API option still chooses the renderer: Vulkan on a
+         * device of the core's own, or OpenGL on contexts of its own */
+        use_vulkan = want_vulkan;
+        LRLOG_INFO("[xemu] Frame output: software (%s, frames in memory)\n",
+                   use_vulkan ? "Vulkan on the core's own device"
+                              : "OpenGL on the core's own contexts");
+        if (use_vulkan) {
+            nv2a_vk_libretro_readback_enable();
+        }
         goto frame_output_set;
     }
 
@@ -4466,6 +4473,8 @@ RETRO_API void retro_run(void)
                 LRLOG_ERROR("[xemu] Frame output: software: no OpenGL context of the core's own could be made\n");
             }
         }
+        /* the Vulkan renderer waits for this (pgraph_vk_init) */
+        qatomic_set(&xemu_libretro_vk_context_ready, true);
         libretro_gl_wake_pfifo();
         context_ready = true;
     }
@@ -4506,7 +4515,33 @@ RETRO_API void retro_run(void)
         int w = 0, h = 0;
         bool got = false;
 
-        if (sw_ctx) {
+        if (use_vulkan) {
+            /* The renderer draws the display on its own thread and device;
+             * the first frame is waited for, the rest only asked for */
+            static bool vk_started;
+            static uint64_t vk_count;
+            const size_t max_px = (size_t)declared_max_width * declared_max_height;
+            if (sw_frame_px < max_px) {
+                g_free(sw_frame);
+                sw_frame = g_malloc(max_px * sizeof(uint32_t));
+                sw_frame_px = max_px;
+            }
+            st_t = g_get_monotonic_time();
+            if (!vk_started) {
+                nv2a_get_framebuffer_surface();
+                nv2a_release_framebuffer_surface();
+            } else {
+                nv2a_trigger_display_render();
+            }
+            got = nv2a_vk_libretro_read_frame(sw_frame, sw_frame_px, &w, &h,
+                                              &vk_count);
+            if (got) {
+                vk_started = true;
+            }
+            st_t = g_get_monotonic_time() - st_t;
+            st_sync_sum += st_t;
+            st_sync_max = MAX(st_sync_max, st_t);
+        } else if (sw_ctx) {
             libretro_gl_enter(sw_ctx);
             st_t = g_get_monotonic_time();
             GLuint tex = nv2a_get_framebuffer_surface();
