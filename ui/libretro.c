@@ -106,6 +106,10 @@ static bool use_vulkan = false;
 static struct retro_rumble_interface rumble;
 /* Graphics API option: Vulkan unless set to OpenGL (read at load) */
 static bool opt_renderer_vulkan = true;
+/* Frame Output: Software. The option as read, and what the machine was
+ * started with (it keeps that until RetroArch is restarted). */
+static bool opt_frame_software = false;
+static bool frame_software = false;
 static bool context_ready = false;
 static bool game_loaded = false;
 
@@ -163,6 +167,9 @@ static bool ra_vk_funcs_resolved = false;
 typedef struct _GloContext GloContext;
 extern GloContext *glo_context_create(void);
 extern void glo_set_current(GloContext *context);
+/* Software frame output (gloffscreen_libretro.c) */
+extern void libretro_gl_enter(GloContext *context);
+extern void libretro_gl_leave(void);
 
 /* ========================================================================= */
 /* Emulation state                                                           */
@@ -1639,6 +1646,12 @@ static void update_variables(void)
     var.value = NULL;
     if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
         opt_renderer_vulkan = strcmp(var.value, "opengl") != 0;
+    }
+
+    var.key = "xemu_frame_output";
+    var.value = NULL;
+    if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+        opt_frame_software = !strcmp(var.value, "software");
     }
 
     var.key = "xemu_aspect_ratio";
@@ -3917,6 +3930,21 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
         want_vulkan = true;
     }
 
+    /* Frame Output: Software. No hardware context is asked for at all: the
+     * OpenGL renderer runs on contexts of the core's own, made at the first
+     * retro_run, and each frame is read back and handed over as pixels. A
+     * machine already started keeps the way it was started. */
+#ifndef __ANDROID__
+    if (!emu_started_once) {
+        frame_software = opt_frame_software;
+    }
+#endif
+    if (frame_software) {
+        LRLOG_INFO("[xemu] Frame output: software (OpenGL on the core's own contexts, frames in memory)\n");
+        use_vulkan = false;
+        goto frame_output_set;
+    }
+
     /* Setup hardware rendering based on frontend preference */
     memset(&hw_render, 0, sizeof(hw_render));
     hw_render.context_reset      = context_reset;
@@ -3989,6 +4017,7 @@ hw_render_set:
         environ_cb(RETRO_ENVIRONMENT_SET_HW_SHARED_CONTEXT, NULL);
     }
 
+frame_output_set:
     /* Populate xemu config from core options */
     populate_config(opt_dvd_path);
 
@@ -4137,6 +4166,100 @@ static void libretro_vblank_bh(void *opaque)
         title_poll = 0;
         poll_guest_title();
     }
+}
+
+/* ---- Frame Output: Software ---- */
+
+/* The core's own context on the retro_run thread: the display textures of
+ * the renderer (pgraph/gl/display.c) are made and read back on it. */
+static GloContext *sw_ctx;
+/* The frame handed to the frontend, XRGB8888, top row first */
+static uint32_t *sw_frame;
+static size_t sw_frame_px;
+
+static const void *sw_black_frame(void)
+{
+    static uint32_t *black;
+    if (!black) {
+        black = g_malloc0(640 * 480 * sizeof(uint32_t));
+    }
+    return black;
+}
+
+/* sw_ctx current. Starts the read-back of the display texture into a pixel
+ * buffer object, which does not wait for the GPU, and copies out the one
+ * started the run before: the frontend gets each frame one run later, and
+ * neither thread waits for the transfer. False when there is no earlier
+ * read-back to take (the first run, or after a change of size). */
+static bool sw_read_frame(GLuint tex, int *out_w, int *out_h)
+{
+    static GLuint fbo, pbo[2];
+    static int pbo_w[2], pbo_h[2], cur;
+    GLint w = 0, h = 0;
+    bool got = false;
+
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    if (w <= 0 || h <= 0 || (unsigned)w > declared_max_width ||
+        (unsigned)h > declared_max_height) {
+        return false;
+    }
+    if (!fbo) {
+        glGenFramebuffers(1, &fbo);
+        glGenBuffers(2, pbo);
+    }
+
+    GLint prev_fbo = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prev_fbo);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, tex, 0);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo[cur]);
+    if (pbo_w[cur] != w || pbo_h[cur] != h) {
+        glBufferData(GL_PIXEL_PACK_BUFFER, (size_t)w * h * sizeof(uint32_t),
+                     NULL, GL_STREAM_READ);
+    }
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+    glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, NULL);
+    pbo_w[cur] = w;
+    pbo_h[cur] = h;
+
+    const int prev = cur ^ 1;
+    const int pw = pbo_w[prev], ph = pbo_h[prev];
+    if (pw > 0 && ph > 0) {
+        if (sw_frame_px < (size_t)pw * ph) {
+            g_free(sw_frame);
+            sw_frame_px = (size_t)pw * ph;
+            sw_frame = g_malloc(sw_frame_px * sizeof(uint32_t));
+        }
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo[prev]);
+        const uint32_t *src = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0,
+            (size_t)pw * ph * sizeof(uint32_t), GL_MAP_READ_BIT);
+        if (src) {
+            /* GL's rows run bottom to top, the frontend's top to bottom */
+            for (int y = 0; y < ph; y++) {
+                memcpy(sw_frame + (size_t)y * pw,
+                       src + (size_t)(ph - 1 - y) * pw,
+                       (size_t)pw * sizeof(uint32_t));
+            }
+            glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+            *out_w = pw;
+            *out_h = ph;
+            got = true;
+        }
+    }
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    cur = prev;
+
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, 0, 0);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, prev_fbo);
+    return got;
 }
 
 RETRO_API void retro_run(void)
@@ -4293,9 +4416,35 @@ RETRO_API void retro_run(void)
         libretro_input_apply_rumble(rumble.set_rumble_state);
     }
 
+    /* Frame Output: Software. No context_reset comes from the frontend, so
+     * the renderer's contexts are made here, once: they are the machine's.
+     * The renderer thread waits for them (libretro_gl_wait_for_contexts). */
+    if (frame_software && !context_ready) {
+        extern void libretro_gl_set_standalone_mode(void);
+        extern void libretro_gl_wake_pfifo(void);
+        if (!sw_ctx) {
+            /* before the frontend's context is set aside: on GLX the
+             * core's own contexts take its display and config */
+            libretro_gl_set_standalone_mode();
+            libretro_gl_enter(NULL);
+            /* leaves the renderer's display context current on this thread;
+             * libretro_gl_leave takes it off again */
+            nv2a_context_init();
+            sw_ctx = glo_context_create();
+            libretro_gl_leave();
+            if (!sw_ctx) {
+                LRLOG_ERROR("[xemu] Frame output: software: no OpenGL context of the core's own could be made\n");
+            }
+        }
+        libretro_gl_wake_pfifo();
+        context_ready = true;
+    }
+
     if (!emu_initialized || !context_ready) {
         /* Emulator not ready yet, draw black frame */
-        if (!use_vulkan && hw_render.get_current_framebuffer) {
+        if (frame_software) {
+            video_cb(sw_black_frame(), 640, 480, 640 * sizeof(uint32_t));
+        } else if (!use_vulkan && hw_render.get_current_framebuffer) {
             uintptr_t fbo = hw_render.get_current_framebuffer();
             glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)fbo);
             glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
@@ -4321,8 +4470,44 @@ RETRO_API void retro_run(void)
     update_aspect();
     update_overscan_crop();
 
+    /* ---- Software frame output (OpenGL renderer) ---- */
+    if (frame_software) {
+        static unsigned last_w, last_h;
+        int w = 0, h = 0;
+        bool got = false;
+
+        if (sw_ctx) {
+            libretro_gl_enter(sw_ctx);
+            st_t = g_get_monotonic_time();
+            GLuint tex = nv2a_get_framebuffer_surface();
+            if (tex) {
+                got = sw_read_frame(tex, &w, &h);
+            }
+            nv2a_release_framebuffer_surface();
+            st_t = g_get_monotonic_time() - st_t;
+            st_sync_sum += st_t;
+            st_sync_max = MAX(st_sync_max, st_t);
+            libretro_gl_leave();
+        }
+
+        st_t = g_get_monotonic_time();
+        if (got) {
+            last_w = (unsigned)w;
+            last_h = (unsigned)h;
+            st_new_frames++;
+            video_cb(sw_frame, last_w, last_h, last_w * sizeof(uint32_t));
+        } else if (last_w) {
+            /* nothing read back this run: the frontend repeats its last frame */
+            video_cb(NULL, last_w, last_h, 0);
+        } else {
+            video_cb(sw_black_frame(), 640, 480, 640 * sizeof(uint32_t));
+        }
+        st_t = g_get_monotonic_time() - st_t;
+        st_video_sum += st_t;
+        st_video_max = MAX(st_video_max, st_t);
+    }
     /* ---- OpenGL path ---- */
-    if (!use_vulkan) {
+    else if (!use_vulkan) {
         /* Get NV2A framebuffer texture */
         GLuint tex = nv2a_get_framebuffer_surface();
         uintptr_t fbo = hw_render.get_current_framebuffer();

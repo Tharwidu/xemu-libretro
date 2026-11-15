@@ -266,6 +266,23 @@ void glo_context_destroy(GloContext *context)
     free(context);
 }
 
+/* Software frame output: the frontend's context, if it has one current on
+ * this thread, is set aside while one of the core's is used, and put back. */
+static HGLRC g_saved_hglrc = NULL;
+static HDC   g_saved_hdc = NULL;
+
+void libretro_gl_enter(GloContext *context)
+{
+    g_saved_hglrc = wglGetCurrentContext();
+    g_saved_hdc = wglGetCurrentDC();
+    glo_set_current(context);
+}
+
+void libretro_gl_leave(void)
+{
+    wglMakeCurrent(g_saved_hdc, g_saved_hglrc);
+}
+
 #elif defined(__APPLE__)
 
 /*
@@ -426,6 +443,20 @@ void glo_context_destroy(GloContext *context)
         g_standalone_root_ctx = NULL;
     }
     free(context);
+}
+
+/* Software frame output: see the Windows one above. */
+static CGLContextObj g_saved_cgl = NULL;
+
+void libretro_gl_enter(GloContext *context)
+{
+    g_saved_cgl = CGLGetCurrentContext();
+    glo_set_current(context);
+}
+
+void libretro_gl_leave(void)
+{
+    CGLSetCurrentContext(g_saved_cgl);
 }
 
 #else /* !_WIN32 && !__APPLE__ */
@@ -604,7 +635,16 @@ void libretro_gl_signal_ready(void)
 void libretro_gl_set_standalone_mode(void)
 {
     g_standalone_gl_mode = true;
-    egl_prepare_standalone();
+    if (dlsym(RTLD_DEFAULT, "glXGetCurrentContext") && glXGetCurrentContext()) {
+        /* Software frame output under a frontend on GLX: contexts of the
+         * core's own on the frontend's display and framebuffer config, not
+         * shared with it. EGL ones beside the frontend's GLX could not be
+         * made current on the renderer's thread (NVIDIA 595). */
+        glx_prepare_from_current();
+        g_glx_share = NULL;
+    } else {
+        egl_prepare_standalone();
+    }
     g_libretro_gl_ready = true;
 }
 
@@ -682,7 +722,11 @@ GloContext *glo_context_create(void)
         }
         ok = egl_create(context, share);
     } else if (g_api == GLO_API_GLX) {
-        ok = glx_create(context, g_glx_share);
+        GLXContext share = g_glx_share;
+        if (g_standalone_gl_mode) {
+            share = g_standalone_root_ctx ? g_standalone_root_ctx->glx_ctx : NULL;
+        }
+        ok = glx_create(context, share);
     }
     if (!ok) {
         free(context);
@@ -735,6 +779,50 @@ void glo_context_destroy(GloContext *context)
         g_standalone_root_ctx = NULL;
     }
     free(context);
+}
+
+/* Software frame output: see the Windows one above. The frontend's context
+ * may be an EGL or a GLX one while the core's are EGL ones of their own;
+ * GLX is only asked when the frontend has libGL loaded (the core does not
+ * link it). */
+static struct {
+    GloApi api;
+    EGLDisplay egl_dpy;
+    EGLSurface egl_draw, egl_read;
+    EGLContext egl_ctx;
+    Display *glx_dpy;
+    GLXDrawable glx_draw, glx_read;
+    GLXContext glx_ctx;
+} g_saved;
+
+void libretro_gl_enter(GloContext *context)
+{
+    g_saved.api = GLO_API_NONE;
+    if (eglGetCurrentContext() != EGL_NO_CONTEXT) {
+        g_saved.api = GLO_API_EGL;
+        g_saved.egl_dpy = eglGetCurrentDisplay();
+        g_saved.egl_draw = eglGetCurrentSurface(EGL_DRAW);
+        g_saved.egl_read = eglGetCurrentSurface(EGL_READ);
+        g_saved.egl_ctx = eglGetCurrentContext();
+    } else if (dlsym(RTLD_DEFAULT, "glXGetCurrentContext") && glXGetCurrentContext()) {
+        g_saved.api = GLO_API_GLX;
+        g_saved.glx_dpy = glXGetCurrentDisplay();
+        g_saved.glx_draw = glXGetCurrentDrawable();
+        g_saved.glx_read = glXGetCurrentReadDrawable();
+        g_saved.glx_ctx = glXGetCurrentContext();
+        glXMakeContextCurrent(g_saved.glx_dpy, None, None, NULL);
+    }
+    glo_set_current(context);
+}
+
+void libretro_gl_leave(void)
+{
+    glo_set_current(NULL);
+    if (g_saved.api == GLO_API_EGL) {
+        eglMakeCurrent(g_saved.egl_dpy, g_saved.egl_draw, g_saved.egl_read, g_saved.egl_ctx);
+    } else if (g_saved.api == GLO_API_GLX) {
+        glXMakeContextCurrent(g_saved.glx_dpy, g_saved.glx_draw, g_saved.glx_read, g_saved.glx_ctx);
+    }
 }
 
 #endif /* _WIN32 */

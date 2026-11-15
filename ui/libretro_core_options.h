@@ -225,6 +225,25 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         },
         "vulkan"
     },
+    /* Hardware by default, the way every frontend that can show hardware
+     * frames gets them without a copy. Software exists for frontends that
+     * cannot: EmuVR's RetroArch 1.7.5 has no Vulkan, and with the OpenGL
+     * renderer on contexts shared with it, Halo 2 ran at about 4.5 fps
+     * inside EmuVR against 30 on contexts of the core's own. */
+    {
+        "xemu_frame_output",
+        "Frame Output (Restart)",
+        NULL,
+        "How frames reach the frontend. Hardware hands RetroArch the rendered frame on the GPU, on its own OpenGL context or Vulkan device. Software renders with OpenGL on contexts of the core's own and hands RetroArch each frame as plain pixels in memory, one frame later; it needs no hardware context from the frontend, so it works with any video driver, and it is the one to use in EmuVR. With Software the Graphics API option is not used, and the light gun crosshairs and the Performance Overlay are not drawn. Takes effect after RetroArch is restarted.",
+        NULL,
+        "video",
+        {
+            { "hardware", "Hardware" },
+            { "software", "Software" },
+            { NULL, NULL },
+        },
+        "hardware"
+    },
     /* 16:9 by default, unlike standalone's dashboard setting: the core is for
      * computers, whose displays are 16:9 nearly always, and no one should
      * have to go to the dashboard first (NNshi) */

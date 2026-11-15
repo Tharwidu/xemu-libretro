@@ -37,6 +37,15 @@ void libretro_gl_set_standalone_mode(void)
 {
 }
 
+void libretro_gl_enter(GloContext *context)
+{
+    (void)context;
+}
+
+void libretro_gl_leave(void)
+{
+}
+
 void libretro_gl_init_wait_event(void)
 {
 }
