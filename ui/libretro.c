@@ -4291,6 +4291,36 @@ RETRO_API void retro_run(void)
     }
 
     run_count++;
+    /* When the frontend calls faster than the content rate it declared,
+     * wait for the next frame's time. A frontend that paces (vsync at the
+     * content rate, or audio sync) is never early, and this does nothing.
+     * One that does not - vsync off with the sound on RetroArch's audio
+     * thread or audio sync off, as inside EmuVR, or a 144 Hz display - ran
+     * the core 144 to 1,300 times a second, and with it the guest's vblank:
+     * Halo ran at 2.4 times its speed on a 144 Hz display. Not while the
+     * frontend fast-forwards. */
+    {
+        static int64_t next_frame_us;
+        bool fast_forward = false;
+        if (environ_cb) {
+            environ_cb(RETRO_ENVIRONMENT_GET_FASTFORWARDING, &fast_forward);
+        }
+        if (!fast_forward) {
+            const int64_t frame_us = 16683; /* 59.94 Hz, as declared */
+            int64_t now_us = g_get_monotonic_time();
+            if (next_frame_us == 0 || now_us > next_frame_us + 2 * frame_us) {
+                next_frame_us = now_us; /* the first run, or after a stall */
+            }
+            while (now_us < next_frame_us) {
+                const int64_t remain_us = next_frame_us - now_us;
+                g_usleep(remain_us > 2000 ? remain_us - 1000 : remain_us);
+                now_us = g_get_monotonic_time();
+            }
+            next_frame_us += frame_us;
+        } else {
+            next_frame_us = 0;
+        }
+    }
     /* the 300-run lines only while Performance Overlay is on (NNshi): a frame
      * presentation benchmark switched with it */
     const bool frame_log = __atomic_load_n(&opt_internal_fps, __ATOMIC_RELAXED);
