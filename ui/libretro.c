@@ -3696,6 +3696,22 @@ static void audio_thread_set_state(bool enabled)
     qatomic_set(&audio_async_enabled, enabled);
 }
 
+/* Asks the frontend for a compatibility-profile GL context, for frontends
+ * too old to say which context they prefer. True when it was accepted. */
+static bool libretro_set_compat_gl_hw_render(void)
+{
+    memset(&hw_render, 0, sizeof(hw_render));
+    hw_render.context_reset      = context_reset;
+    hw_render.context_destroy    = context_destroy;
+    hw_render.depth              = true;
+    hw_render.stencil            = true;
+    hw_render.bottom_left_origin = true;
+    hw_render.cache_context      = true;
+    hw_render.context_type       = RETRO_HW_CONTEXT_OPENGL;
+    LRLOG_INFO("[xemu] Requesting OpenGL (compatibility) HW context\n");
+    return environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render);
+}
+
 RETRO_API bool retro_load_game(const struct retro_game_info *game)
 {
     /* The pads' motors (retro_run); without one, no rumble */
@@ -3869,10 +3885,19 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
 
     /* Query the frontend's preferred HW render context */
     unsigned preferred_hw = RETRO_HW_CONTEXT_OPENGL_CORE;
+    /* A frontend from before this call (RetroArch 1.7.5 and older) does not
+     * answer it. Those frontends are asked for a compatibility GL context
+     * first: EmuVR's RetroArch 1.7.5 shows no picture from a core-profile
+     * one, while its other hardware-rendered cores, on compatibility
+     * contexts, show theirs. A frontend that answers is asked for core
+     * profile 4.0, as before. */
+    bool old_frontend = true;
     if (environ_cb) {
-        environ_cb(RETRO_ENVIRONMENT_GET_PREFERRED_HW_RENDER, &preferred_hw);
+        old_frontend = !environ_cb(RETRO_ENVIRONMENT_GET_PREFERRED_HW_RENDER,
+                                   &preferred_hw);
     }
-    LRLOG_INFO("[xemu] Frontend preferred HW render: %u\n", preferred_hw);
+    LRLOG_INFO("[xemu] Frontend preferred HW render: %u%s\n", preferred_hw,
+               old_frontend ? " (not answered)" : "");
 
     /* The Graphics API option decides, not the frontend's video driver:
      * RetroArch's preferred context only follows its own driver setting */
@@ -3913,7 +3938,9 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
         hw_render.version_minor = 0;
     }
 
-    if (!environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render)) {
+    if (!want_vulkan && old_frontend && libretro_set_compat_gl_hw_render()) {
+        /* hw_render is set and accepted */
+    } else if (!environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render)) {
         /* Preferred context failed - try the other one */
         LRLOG_INFO("[xemu] Preferred context failed, trying fallback\n");
         memset(&hw_render, 0, sizeof(hw_render));
@@ -3929,6 +3956,9 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
             hw_render.version_major = 4;
             hw_render.version_minor = 0;
             want_vulkan = false;
+            if (old_frontend && libretro_set_compat_gl_hw_render()) {
+                goto hw_render_set;
+            }
         } else {
             hw_render.context_type = RETRO_HW_CONTEXT_VULKAN;
             hw_render.version_major = 1;
@@ -3941,6 +3971,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
             return false;
         }
     }
+hw_render_set:
 
     if (emu_started_once && !want_vulkan) {
         /* the machine's renderer is Vulkan and cannot be changed under it */
