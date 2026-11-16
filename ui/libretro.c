@@ -4304,8 +4304,9 @@ RETRO_API void retro_run(void)
      * One that does not - vsync off with the sound on RetroArch's audio
      * thread or audio sync off, as inside EmuVR, or a 144 Hz display - ran
      * the core 144 to 1,300 times a second, and with it the guest's vblank:
-     * Halo ran at 2.4 times its speed on a 144 Hz display. Not while the
-     * frontend fast-forwards. */
+     * on a 144 Hz display Halo drew 72 frames a second in place of 30 (its
+     * timed events kept their times; what it animates by the frame ran
+     * fast). Not while the frontend fast-forwards. */
     {
         static int64_t next_frame_us;
         bool fast_forward = false;
